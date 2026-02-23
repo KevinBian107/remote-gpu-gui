@@ -1,22 +1,10 @@
-CLUSTERS = {
-    "topovnl-salk": {
-        "host": "10.7.30.216",
-        "port": 30988,
-        "username": "root",
-    },
-    "vqmimic-salk-1": {
-        "host": "10.7.30.114",
-        "port": 30804,
-        "username": "root",
-    },
-    "vqmimic-salk-2": {
-        "host": "10.7.30.112",
-        "port": 32348,
-        "username": "root",
-    },
-    "vqmimic-salk-3": {
-        "host": "10.7.30.112",
-        "port": 31658,
-        "username": "root",
-    },
-}
+import yaml
+from pathlib import Path
+
+_cfg_path = Path(__file__).parent / "config.yaml"
+with open(_cfg_path) as f:
+    _cfg = yaml.safe_load(f)
+
+SERVER = _cfg.get("server", {})
+PROJECT = _cfg.get("project", {})
+CLUSTERS = _cfg.get("clusters", {})

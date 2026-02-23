@@ -9,3 +9,4 @@ dependencies:
     - fastapi
     - uvicorn[standard]
     - paramiko
+    - pyyaml

@@ -6,6 +6,7 @@ let pollInterval = null;
 let terminals = {};          // {name: {term, ws, fitAddon}}
 let activeTerminal = null;
 let claudeTerminal = null;  // {term, ws, fitAddon, cluster}
+let projectConfig = {};     // from /api/config
 
 /* ── Boot ──────────────────────────────────────────────────────────────────── */
 
@@ -116,9 +117,14 @@ async function enterDashboard() {
   document.getElementById("login-screen").classList.add("hidden");
   document.getElementById("dashboard").classList.remove("hidden");
 
-  // Fetch cluster list
-  const resp = await fetch("/api/clusters");
-  clusters = await resp.json();
+  // Fetch config and cluster list
+  const [cfgResp, clusterResp] = await Promise.all([
+    fetch("/api/config"),
+    fetch("/api/clusters"),
+  ]);
+  const cfgData = await cfgResp.json();
+  projectConfig = cfgData.project || {};
+  clusters = await clusterResp.json();
 
   // Populate sidebar
   const list = document.getElementById("cluster-list");
@@ -442,9 +448,11 @@ function initTerminal(name) {
     // Send initial terminal size so remote shell knows dimensions
     ws.send(`\x01RESIZE:${term.cols},${term.rows}`);
     // Auto-navigate and attach screen session if it exists
+    const projDir = projectConfig.directory || "/home/jovyan/vast/kaiwen/track-mjx";
+    const screenName = projectConfig.screen_session || "train-vqvae";
     setTimeout(() => {
-      ws.send("cd /home/jovyan/vast/kaiwen/track-mjx\n");
-      setTimeout(() => ws.send("screen -ls | grep -q train-vqvae && screen -xRR train-vqvae\n"), 300);
+      ws.send(`cd ${projDir}\n`);
+      setTimeout(() => ws.send(`screen -ls | grep -q ${screenName} && screen -xRR ${screenName}\n`), 300);
     }, 500);
   };
 
@@ -530,15 +538,17 @@ function launchClaude() {
     term.writeln(`\x1b[32mConnected to ${cluster} — launching Claude...\x1b[0m\r`);
     ws.send(`\x01RESIZE:${term.cols},${term.rows}`);
     // Switch to devuser, cd to project, then attach or create screen session
+    const projDir = projectConfig.directory || "/home/jovyan/vast/kaiwen/track-mjx";
+    const claudeUser = projectConfig.claude_user || "devuser";
+    const claudeScreen = projectConfig.claude_screen_session || "claude";
     setTimeout(() => {
-      ws.send("su - devuser\n");
+      ws.send(`su - ${claudeUser}\n`);
       setTimeout(() => {
         ws.send("exec bash\n");
         setTimeout(() => {
-          ws.send("cd /home/jovyan/vast/kaiwen/track-mjx/\n");
+          ws.send(`cd ${projDir}\n`);
           setTimeout(() => {
-            // Attach if screen exists, otherwise create and run claude
-            ws.send("screen -ls 2>/dev/null | grep -q '\\.claude\\b' && screen -r claude || screen -S claude bash -c 'claude --dangerously-skip-permissions; exec bash'\n");
+            ws.send(`screen -ls 2>/dev/null | grep -q '\\.${claudeScreen}\\b' && screen -r ${claudeScreen} || screen -S ${claudeScreen} bash -c 'claude --dangerously-skip-permissions; exec bash'\n`);
           }, 300);
         }, 300);
       }, 300);
@@ -558,6 +568,9 @@ function launchClaude() {
   });
 
   claudeTerminal = { term, ws, fitAddon, cluster };
+
+  // Load file explorer for this cluster
+  initFileExplorer();
 }
 
 function fitClaudeTerminal() {
@@ -565,6 +578,126 @@ function fitClaudeTerminal() {
   setTimeout(() => {
     try { claudeTerminal.fitAddon.fit(); } catch (e) {}
   }, 50);
+}
+
+/* ── File explorer ─────────────────────────────────────────────────────────── */
+
+function getFileCluster() {
+  return document.getElementById("claude-cluster-select").value;
+}
+
+async function loadFileTree(path, parentEl, depth) {
+  const cluster = getFileCluster();
+  if (!cluster) return;
+
+  try {
+    const resp = await fetch(`/api/files/${cluster}?path=${encodeURIComponent(path)}`);
+    const data = await resp.json();
+    if (data.error) return;
+
+    parentEl.innerHTML = "";
+    for (const entry of data.entries) {
+      const entryPath = path ? `${path}/${entry.name}` : entry.name;
+
+      if (entry.is_dir) {
+        const wrapper = document.createElement("div");
+        wrapper.className = `depth-${depth}`;
+
+        const row = document.createElement("div");
+        row.className = "file-entry dir";
+        row.innerHTML = `<span class="file-icon">&#9656;</span>${esc(entry.name)}`;
+
+        const children = document.createElement("div");
+        children.className = "file-children";
+
+        let loaded = false;
+        row.addEventListener("click", async () => {
+          if (!loaded) {
+            await loadFileTree(entryPath, children, depth + 1);
+            loaded = true;
+          }
+          const isOpen = children.classList.toggle("open");
+          row.querySelector(".file-icon").innerHTML = isOpen ? "&#9662;" : "&#9656;";
+        });
+
+        wrapper.appendChild(row);
+        wrapper.appendChild(children);
+        parentEl.appendChild(wrapper);
+      } else {
+        const wrapper = document.createElement("div");
+        wrapper.className = `depth-${depth}`;
+
+        const isMd = entry.name.endsWith(".md");
+        const row = document.createElement("div");
+        row.className = `file-entry${isMd ? " md-file" : ""}`;
+
+        let icon = "&#128196;";
+        if (isMd) icon = "&#128214;";
+        else if (entry.name.endsWith(".py")) icon = "&#128013;";
+        else if (entry.name.endsWith(".yaml") || entry.name.endsWith(".yml")) icon = "&#9881;";
+        else if (entry.name.endsWith(".json")) icon = "{ }";
+
+        row.innerHTML = `<span class="file-icon">${icon}</span>${esc(entry.name)}`;
+        row.addEventListener("click", () => openFile(entryPath, entry.name));
+
+        wrapper.appendChild(row);
+        parentEl.appendChild(wrapper);
+      }
+    }
+  } catch (e) {
+    parentEl.innerHTML = `<div style="padding:12px;color:var(--red);font-size:0.8rem">Failed to load</div>`;
+  }
+}
+
+async function openFile(path, name) {
+  const cluster = getFileCluster();
+  if (!cluster) return;
+
+  const viewer = document.getElementById("file-viewer");
+  const nameEl = document.getElementById("file-viewer-name");
+  const contentEl = document.getElementById("file-viewer-content");
+
+  nameEl.textContent = name;
+  contentEl.textContent = "Loading...";
+  contentEl.className = "";
+  viewer.classList.remove("hidden");
+
+  try {
+    const resp = await fetch(`/api/file/${cluster}?path=${encodeURIComponent(path)}`);
+    const data = await resp.json();
+    if (data.error) {
+      contentEl.textContent = `Error: ${data.error}`;
+      contentEl.className = "plaintext";
+      return;
+    }
+
+    if (name.endsWith(".md")) {
+      contentEl.className = "markdown";
+      contentEl.innerHTML = marked.parse(data.content);
+    } else {
+      contentEl.className = "plaintext";
+      contentEl.textContent = data.content;
+    }
+  } catch (e) {
+    contentEl.textContent = `Error: ${e.message}`;
+    contentEl.className = "plaintext";
+  }
+}
+
+function initFileExplorer() {
+  const cluster = getFileCluster();
+  if (!cluster) return;
+
+  const dir = projectConfig.directory || "/home/jovyan/vast/kaiwen/track-mjx";
+  document.getElementById("file-explorer-path").textContent = dir.split("/").filter(Boolean).pop() || dir;
+  const tree = document.getElementById("file-tree");
+  tree.innerHTML = `<div style="padding:12px;color:var(--text-dim);font-size:0.8rem">Loading...</div>`;
+  loadFileTree("", tree, 0);
+
+  // Close button
+  document.getElementById("file-viewer-close").onclick = () => {
+    document.getElementById("file-viewer").classList.add("hidden");
+  };
 }
 
 /* ── Utility ──────────────────────────────────────────────────────────────── */

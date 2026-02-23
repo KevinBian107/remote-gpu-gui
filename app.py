@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from config import CLUSTERS
+from config import CLUSTERS, PROJECT
 from ssh_manager import SSHManager
 
 ssh = SSHManager()
@@ -33,6 +33,11 @@ class LoginRequest(BaseModel):
 async def login(req: LoginRequest):
     results = await asyncio.to_thread(ssh.connect_all, req.password)
     return JSONResponse(content=results)
+
+
+@app.get("/api/config")
+async def get_config():
+    return JSONResponse(content={"project": PROJECT})
 
 
 @app.get("/api/clusters")
@@ -285,6 +290,74 @@ def _safe_float(s: str) -> float:
         return float(s)
     except (ValueError, TypeError):
         return 0.0
+
+
+# ── File browser ─────────────────────────────────────────────────────────────
+
+def _file_root() -> str:
+    return PROJECT.get("directory", "/home/jovyan/vast/kaiwen/track-mjx")
+
+
+@app.get("/api/files/{cluster}")
+async def list_files(cluster: str, path: str = ""):
+    if cluster not in CLUSTERS:
+        return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
+    if not ssh.is_connected(cluster):
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    import posixpath
+    root = _file_root()
+    full = posixpath.normpath(posixpath.join(root, path))
+    if not full.startswith(root):
+        return JSONResponse(content={"error": "Invalid path"}, status_code=400)
+
+    try:
+        result = await asyncio.to_thread(
+            ssh.execute, cluster,
+            f"ls -1pA {full!r}",
+        )
+        if result["exit_code"] != 0:
+            return JSONResponse(content={"error": result["stderr"].strip()}, status_code=400)
+
+        entries = []
+        for name in result["stdout"].strip().splitlines():
+            if not name:
+                continue
+            is_dir = name.endswith("/")
+            clean = name.rstrip("/")
+            entries.append({"name": clean, "is_dir": is_dir})
+
+        entries.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
+        return JSONResponse(content={"path": posixpath.relpath(full, root), "entries": entries})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/api/file/{cluster}")
+async def read_file(cluster: str, path: str = ""):
+    if cluster not in CLUSTERS:
+        return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
+    if not ssh.is_connected(cluster):
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    import posixpath
+    root = _file_root()
+    full = posixpath.normpath(posixpath.join(root, path))
+    if not full.startswith(root):
+        return JSONResponse(content={"error": "Invalid path"}, status_code=400)
+
+    try:
+        result = await asyncio.to_thread(
+            ssh.execute, cluster,
+            f"head -c 512000 {full!r}",
+            timeout=10,
+        )
+        if result["exit_code"] != 0:
+            return JSONResponse(content={"error": result["stderr"].strip()}, status_code=400)
+
+        return JSONResponse(content={"path": path, "content": result["stdout"]})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
 # ── Static files (must be last) ──────────────────────────────────────────────

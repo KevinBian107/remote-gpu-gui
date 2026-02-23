@@ -88,13 +88,29 @@
           </label>
           <button id="claude-connect-btn">Launch</button>
         </div>
-        <div id="claude-terminal-container"></div>
+        <div id="claude-body">
+          <div id="claude-terminal-container"></div>
+          <div id="file-explorer">
+            <div id="file-explorer-header">
+              <span id="file-explorer-path">/</span>
+            </div>
+            <div id="file-tree"></div>
+            <div id="file-viewer" class="hidden">
+              <div id="file-viewer-header">
+                <span id="file-viewer-name"></span>
+                <button id="file-viewer-close">x</button>
+              </div>
+              <div id="file-viewer-content"></div>
+            </div>
+          </div>
+        </div>
       </section>
     </main>
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.0/marked.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
