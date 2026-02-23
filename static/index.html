@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GPU Cluster Dashboard</title>
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
+</head>
+<body>
+  <!-- Login screen -->
+  <div id="login-screen">
+    <div class="login-box">
+      <h1>GPU Cluster Dashboard</h1>
+      <p>Enter your SSH password to connect to all clusters.</p>
+      <input type="password" id="password-input" placeholder="SSH password" autofocus>
+      <button id="login-btn">Connect</button>
+      <div id="login-status"></div>
+    </div>
+  </div>
+
+  <!-- Main dashboard -->
+  <div id="dashboard" class="hidden">
+    <!-- Sidebar -->
+    <aside id="sidebar">
+      <h2>Clusters</h2>
+      <ul id="cluster-list"></ul>
+      <button id="logout-btn">Disconnect</button>
+    </aside>
+
+    <!-- Main content -->
+    <main id="main">
+      <!-- Tab bar -->
+      <nav id="tab-bar">
+        <button class="tab active" data-tab="overview">Overview</button>
+        <button class="tab" data-tab="gpu">GPU Detail</button>
+        <button class="tab" data-tab="processes">Processes</button>
+        <button class="tab" data-tab="terminal">Terminal</button>
+      </nav>
+
+      <!-- Overview tab -->
+      <section id="tab-overview" class="tab-content active">
+        <div id="overview-cards"></div>
+      </section>
+
+      <!-- GPU detail tab -->
+      <section id="tab-gpu" class="tab-content">
+        <div class="tab-toolbar">
+          <label>Cluster:
+            <select id="gpu-cluster-select"></select>
+          </label>
+        </div>
+        <div id="gpu-detail"></div>
+      </section>
+
+      <!-- Processes tab -->
+      <section id="tab-processes" class="tab-content">
+        <div class="tab-toolbar">
+          <label>Cluster:
+            <select id="proc-cluster-select"></select>
+          </label>
+          <input type="text" id="proc-filter" placeholder="Filter processes...">
+        </div>
+        <div id="process-table-container">
+          <table id="process-table">
+            <thead>
+              <tr>
+                <th data-sort="user">User</th>
+                <th data-sort="pid">PID</th>
+                <th data-sort="cpu">%CPU</th>
+                <th data-sort="mem">%MEM</th>
+                <th data-sort="rss">RSS</th>
+                <th data-sort="command">Command</th>
+              </tr>
+            </thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Terminal tab -->
+      <section id="tab-terminal" class="tab-content">
+        <div id="terminal-tabs"></div>
+        <div id="terminal-container"></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  <script src="/app.js"></script>
+</body>
+</html>
