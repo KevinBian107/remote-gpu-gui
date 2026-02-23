@@ -87,6 +87,26 @@ train_setup.train_config.seed=123
 
 ---
 
+## Troubleshooting
+
+### MuJoCo rendering fails
+
+If you get OpenGL errors during evaluation/rendering, install the EGL dependencies and set the environment variables:
+
+```bash
+apt-get install -y libopengl0 libgl1
+export MUJOCO_GL=egl
+export PYOPENGL_PLATFORM=egl
+```
+
+To make it persist across sessions, add the exports to your shell rc or prefix the training command:
+
+```bash
+MUJOCO_GL=egl PYOPENGL_PLATFORM=egl python train_vqvae.py
+```
+
+---
+
 ## Network Config Defaults
 
 | Parameter | Default | Notes |
