@@ -7,6 +7,9 @@ let terminals = {};          // {name: {term, ws, fitAddon}}
 let activeTerminal = null;
 let claudeTerminal = null;  // {term, ws, fitAddon, cluster}
 let projectConfig = {};     // from /api/config
+let dsmlpConfig = {};       // from /api/dsmlp/config
+let dsmlpConnected = false;
+let dsmlpPod = null;
 
 /* ── Boot ──────────────────────────────────────────────────────────────────── */
 
@@ -16,6 +19,11 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("password-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") doLogin();
   });
+  document.getElementById("dsmlp-launch-btn").addEventListener("click", doDSMLPLaunch);
+
+  // Login mode dropdown — show/hide fields
+  document.getElementById("login-mode").addEventListener("change", updateLoginFields);
+  updateLoginFields();
 
   // Tabs
   document.querySelectorAll("#tab-bar .tab").forEach((btn) => {
@@ -45,48 +53,147 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("claude-connect-btn").addEventListener("click", launchClaude);
 });
 
+function updateLoginFields() {
+  const mode = document.getElementById("login-mode").value;
+  const runaiFields = document.getElementById("runai-fields");
+  const dsmlpFields = document.getElementById("dsmlp-fields");
+
+  if (mode === "runai") {
+    runaiFields.classList.remove("hidden");
+    dsmlpFields.classList.add("hidden");
+  } else if (mode === "dsmlp") {
+    runaiFields.classList.add("hidden");
+    dsmlpFields.classList.remove("hidden");
+  } else {
+    // both
+    runaiFields.classList.remove("hidden");
+    dsmlpFields.classList.remove("hidden");
+  }
+}
+
 /* ── Login / Logout ───────────────────────────────────────────────────────── */
 
-async function doLogin() {
-  const pw = document.getElementById("password-input").value;
-  const statusEl = document.getElementById("login-status");
-  if (!pw) { statusEl.textContent = "Please enter a password."; statusEl.className = "error"; return; }
+let runaiConnected = false;
 
-  statusEl.textContent = "Connecting...";
-  statusEl.className = "";
-  document.getElementById("login-btn").disabled = true;
+async function doLogin() {
+  const mode = document.getElementById("login-mode").value;
+  const statusEl = document.getElementById("login-status");
+  const loginBtn = document.getElementById("login-btn");
+
+  const needsRunai = mode === "runai" || mode === "both";
+  const needsDsmlp = mode === "dsmlp" || mode === "both";
+
+  // Validate
+  if (needsRunai) {
+    const pw = document.getElementById("password-input").value;
+    if (!pw) { statusEl.textContent = "Please enter a password."; statusEl.className = "error"; return; }
+  }
+
+  loginBtn.disabled = true;
+  let messages = [];
+
+  // RunAI connect
+  if (needsRunai) {
+    const pw = document.getElementById("password-input").value;
+    statusEl.textContent = "Connecting to RunAI clusters...";
+    statusEl.className = "";
+
+    try {
+      const resp = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: pw }),
+      });
+      const data = await resp.json();
+
+      const connected = Object.entries(data).filter(([, v]) => v.ok).map(([k]) => k);
+      const failed = Object.entries(data).filter(([, v]) => !v.ok);
+
+      if (connected.length === 0) {
+        messages.push("RunAI: failed to connect to any cluster.");
+      } else {
+        runaiConnected = true;
+        let msg = `RunAI: ${connected.length} cluster(s) connected.`;
+        if (failed.length > 0) {
+          msg += ` Failed: ${failed.map(([k, v]) => `${k} (${v.error})`).join(", ")}`;
+        }
+        messages.push(msg);
+      }
+    } catch (e) {
+      messages.push(`RunAI error: ${e.message}`);
+    }
+  }
+
+  // DSMLP connect
+  if (needsDsmlp) {
+    statusEl.textContent = "Connecting to DSMLP (approve Duo push on your phone)...";
+    statusEl.className = "launching";
+
+    try {
+      const resp = await fetch("/api/dsmlp/login", { method: "POST" });
+      const data = await resp.json();
+
+      if (!data.connected) {
+        messages.push(`DSMLP: ${data.error}`);
+      } else {
+        dsmlpConnected = true;
+        dsmlpPod = data.pod;
+        if (dsmlpPod) {
+          messages.push(`DSMLP: connected. Pod: ${dsmlpPod}`);
+        } else {
+          messages.push("DSMLP: connected. No running pod — use Launch Pod.");
+          document.getElementById("dsmlp-launch-btn").classList.remove("hidden");
+        }
+      }
+    } catch (e) {
+      messages.push(`DSMLP error: ${e.message}`);
+    }
+  }
+
+  statusEl.textContent = messages.join(" | ");
+
+  // If anything connected, enter dashboard
+  const anyConnected = runaiConnected || (dsmlpConnected && dsmlpPod);
+  if (anyConnected) {
+    statusEl.className = "success";
+    setTimeout(() => enterDashboard(), 500);
+  } else if (dsmlpConnected && !dsmlpPod) {
+    // Connected to DSMLP but no pod — wait for launch
+    statusEl.className = "";
+    loginBtn.disabled = false;
+  } else {
+    statusEl.className = "error";
+    loginBtn.disabled = false;
+  }
+}
+
+async function doDSMLPLaunch() {
+  const statusEl = document.getElementById("login-status");
+  const launchBtn = document.getElementById("dsmlp-launch-btn");
+  statusEl.textContent = "Launching pod (this may take up to 60s)...";
+  statusEl.className = "launching";
+  launchBtn.disabled = true;
 
   try {
-    const resp = await fetch("/api/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: pw }),
-    });
+    const resp = await fetch("/api/dsmlp/launch", { method: "POST" });
     const data = await resp.json();
 
-    const connected = Object.entries(data).filter(([, v]) => v.ok).map(([k]) => k);
-    const failed = Object.entries(data).filter(([, v]) => !v.ok);
-
-    if (connected.length === 0) {
-      statusEl.textContent = "Failed to connect to any cluster.";
+    if (!data.ok) {
+      statusEl.textContent = `Launch failed: ${data.error}`;
       statusEl.className = "error";
-      document.getElementById("login-btn").disabled = false;
+      launchBtn.disabled = false;
       return;
     }
 
-    let msg = `Connected to ${connected.length} cluster(s).`;
-    if (failed.length > 0) {
-      msg += ` Failed: ${failed.map(([k, v]) => `${k} (${v.error})`).join(", ")}`;
-    }
-    statusEl.textContent = msg;
-    statusEl.className = "";
-
-    // Small delay for user to see status, then switch to dashboard
+    dsmlpPod = data.pod;
+    statusEl.textContent = `Pod running: ${dsmlpPod}`;
+    statusEl.className = "success";
+    launchBtn.classList.add("hidden");
     setTimeout(() => enterDashboard(), 500);
   } catch (e) {
     statusEl.textContent = `Error: ${e.message}`;
     statusEl.className = "error";
-    document.getElementById("login-btn").disabled = false;
+    launchBtn.disabled = false;
   }
 }
 
@@ -109,11 +216,18 @@ function doLogout() {
 
   if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
 
+  // Reset state
+  runaiConnected = false;
+  dsmlpConnected = false;
+  dsmlpPod = null;
+
   document.getElementById("dashboard").classList.add("hidden");
   document.getElementById("login-screen").classList.remove("hidden");
   document.getElementById("password-input").value = "";
   document.getElementById("login-btn").disabled = false;
   document.getElementById("login-status").textContent = "";
+  document.getElementById("dsmlp-launch-btn").classList.add("hidden");
+  updateLoginFields();
 }
 
 /* ── Dashboard entry ──────────────────────────────────────────────────────── */
@@ -123,21 +237,48 @@ async function enterDashboard() {
   document.getElementById("dashboard").classList.remove("hidden");
 
   // Fetch config and cluster list
-  const [cfgResp, clusterResp] = await Promise.all([
+  const [cfgResp, clusterResp, dsmlpCfgResp] = await Promise.all([
     fetch("/api/config"),
     fetch("/api/clusters"),
+    fetch("/api/dsmlp/config"),
   ]);
   const cfgData = await cfgResp.json();
   projectConfig = cfgData.project || {};
-  clusters = await clusterResp.json();
+  const dsmlpCfgData = await dsmlpCfgResp.json();
+  dsmlpConfig = dsmlpCfgData.dsmlp || {};
+
+  // Only include RunAI clusters if RunAI was connected
+  if (runaiConnected) {
+    clusters = await clusterResp.json();
+  } else {
+    clusters = {};
+  }
 
   // Populate sidebar
   const list = document.getElementById("cluster-list");
   list.innerHTML = "";
-  for (const [name, info] of Object.entries(clusters)) {
+
+  // RunAI clusters (only if connected)
+  if (runaiConnected) {
+    for (const [name, info] of Object.entries(clusters)) {
+      const li = document.createElement("li");
+      li.innerHTML = `<span class="status-dot ${info.connected ? "connected" : "disconnected"}"></span>${name}`;
+      li.dataset.cluster = name;
+      list.appendChild(li);
+    }
+  }
+
+  // DSMLP entry in sidebar (only if connected with pod)
+  if (dsmlpConnected && dsmlpPod) {
+    if (runaiConnected) {
+      const sep = document.createElement("li");
+      sep.className = "sidebar-separator";
+      list.appendChild(sep);
+    }
+
     const li = document.createElement("li");
-    li.innerHTML = `<span class="status-dot ${info.connected ? "connected" : "disconnected"}"></span>${name}`;
-    li.dataset.cluster = name;
+    li.innerHTML = `<span class="status-dot connected"></span>dsmlp (UCSD)`;
+    li.dataset.cluster = "dsmlp";
     list.appendChild(li);
   }
 
@@ -145,11 +286,15 @@ async function enterDashboard() {
   populateSelect("proc-cluster-select");
   populateSelect("claude-cluster-select");
 
-  // Build terminal tabs
+  // Build terminal tabs and auto-init the first one
   buildTerminalTabs();
+  if (activeTerminal) {
+    initTerminal(activeTerminal);
+  }
 
-  // Start polling
+  // Fetch metrics immediately and start polling
   await fetchAllMetrics();
+  renderOverview();
   pollInterval = setInterval(fetchAllMetrics, 5000);
 }
 
@@ -163,6 +308,13 @@ function populateSelect(id) {
       opt.textContent = name;
       sel.appendChild(opt);
     }
+  }
+  // Add DSMLP option if connected
+  if (dsmlpConnected && dsmlpPod) {
+    const opt = document.createElement("option");
+    opt.value = "dsmlp";
+    opt.textContent = "dsmlp (UCSD)";
+    sel.appendChild(opt);
   }
 }
 
@@ -181,10 +333,22 @@ function switchTab(tab) {
 /* ── Metrics polling ──────────────────────────────────────────────────────── */
 
 async function fetchAllMetrics() {
+  const fetches = [];
+
+  // RunAI clusters
   const names = Object.entries(clusters).filter(([, v]) => v.connected).map(([k]) => k);
-  const results = await Promise.allSettled(
-    names.map((name) => fetch(`/api/metrics/${name}`).then((r) => r.json()).then((data) => [name, data]))
-  );
+  fetches.push(...names.map((name) =>
+    fetch(`/api/metrics/${name}`).then((r) => r.json()).then((data) => [name, data])
+  ));
+
+  // DSMLP
+  if (dsmlpConnected && dsmlpPod) {
+    fetches.push(
+      fetch("/api/dsmlp/metrics").then((r) => r.json()).then((data) => ["dsmlp", data])
+    );
+  }
+
+  const results = await Promise.allSettled(fetches);
   for (const r of results) {
     if (r.status === "fulfilled") {
       const [name, data] = r.value;
@@ -192,7 +356,6 @@ async function fetchAllMetrics() {
     }
   }
   renderOverview();
-  // Also refresh GPU detail if that tab is active
   if (document.getElementById("tab-gpu").classList.contains("active")) {
     renderGPUDetail();
   }
@@ -200,50 +363,67 @@ async function fetchAllMetrics() {
 
 /* ── Overview rendering ───────────────────────────────────────────────────── */
 
+function getAllClusterEntries() {
+  // Returns array of [name, {connected}] for both RunAI and DSMLP
+  const entries = Object.entries(clusters);
+  if (dsmlpConnected && dsmlpPod) {
+    entries.push(["dsmlp (UCSD)", { connected: true, _isDsmlp: true }]);
+  }
+  return entries;
+}
+
 function renderOverview() {
   const container = document.getElementById("overview-cards");
   container.innerHTML = "";
 
   for (const [name, info] of Object.entries(clusters)) {
-    const card = document.createElement("div");
-    card.className = "cluster-card";
-
-    const m = metricsCache[name];
-    if (!info.connected || !m) {
-      card.innerHTML = `<h3><span class="status-dot disconnected"></span>${name}</h3><p class="not-connected-msg">Not connected</p>`;
-      container.appendChild(card);
-      continue;
-    }
-
-    const sys = m.system;
-    const gpus = m.gpu;
-    const memPct = sys.mem_total_mb ? Math.round(sys.mem_used_mb / sys.mem_total_mb * 100) : 0;
-
-    // Average GPU utilization
-    const avgGpuUtil = gpus.length ? Math.round(gpus.reduce((a, g) => a + g.utilization, 0) / gpus.length) : 0;
-    const avgGpuMem = gpus.length ? Math.round(gpus.reduce((a, g) => a + (g.memory_total ? g.memory_used / g.memory_total * 100 : 0), 0) / gpus.length) : 0;
-
-    card.innerHTML = `
-      <h3><span class="status-dot connected"></span>${name}</h3>
-      ${metricBarHTML("GPU Util (avg)", avgGpuUtil)}
-      ${metricBarHTML("GPU Mem (avg)", avgGpuMem)}
-      ${metricBarHTML("CPU Load", Math.round(sys.cpu_percent))}
-      ${metricBarHTML("RAM", memPct, `${sys.mem_used_mb}/${sys.mem_total_mb} MB`)}
-      <div class="metric-row">
-        <span class="metric-label">Disk</span>
-        <span class="metric-value">${sys.disk_used} / ${sys.disk_total} (${sys.disk_percent})</span>
-      </div>
-      <div class="gpu-mini-list">
-        ${gpus.map((g) => `
-          <div class="gpu-mini-row">
-            <span>GPU ${g.index}: ${g.name}</span>
-            <span>${g.utilization}% | ${Math.round(g.memory_used)}/${Math.round(g.memory_total)} MiB | ${g.temperature}°C</span>
-          </div>
-        `).join("")}
-      </div>
-    `;
-    container.appendChild(card);
+    container.appendChild(renderClusterCard(name, info));
   }
+
+  // DSMLP card
+  if (dsmlpConnected && dsmlpPod) {
+    container.appendChild(renderClusterCard("dsmlp", { connected: true }));
+  }
+}
+
+function renderClusterCard(name, info) {
+  const card = document.createElement("div");
+  card.className = "cluster-card";
+  const displayName = name === "dsmlp" ? "dsmlp (UCSD)" : name;
+
+  const m = metricsCache[name];
+  if (!info.connected || !m) {
+    card.innerHTML = `<h3><span class="status-dot disconnected"></span>${displayName}</h3><p class="not-connected-msg">Not connected</p>`;
+    return card;
+  }
+
+  const sys = m.system;
+  const gpus = m.gpu;
+  const memPct = sys.mem_total_mb ? Math.round(sys.mem_used_mb / sys.mem_total_mb * 100) : 0;
+
+  const avgGpuUtil = gpus.length ? Math.round(gpus.reduce((a, g) => a + g.utilization, 0) / gpus.length) : 0;
+  const avgGpuMem = gpus.length ? Math.round(gpus.reduce((a, g) => a + (g.memory_total ? g.memory_used / g.memory_total * 100 : 0), 0) / gpus.length) : 0;
+
+  card.innerHTML = `
+    <h3><span class="status-dot connected"></span>${displayName}</h3>
+    ${metricBarHTML("GPU Util (avg)", avgGpuUtil)}
+    ${metricBarHTML("GPU Mem (avg)", avgGpuMem)}
+    ${metricBarHTML("CPU Load", Math.round(sys.cpu_percent))}
+    ${metricBarHTML("RAM", memPct, `${sys.mem_used_mb}/${sys.mem_total_mb} MB`)}
+    <div class="metric-row">
+      <span class="metric-label">Disk</span>
+      <span class="metric-value">${sys.disk_used} / ${sys.disk_total} (${sys.disk_percent})</span>
+    </div>
+    <div class="gpu-mini-list">
+      ${gpus.map((g) => `
+        <div class="gpu-mini-row">
+          <span>GPU ${g.index}: ${g.name}</span>
+          <span>${g.utilization}% | ${Math.round(g.memory_used)}/${Math.round(g.memory_total)} MiB | ${g.temperature}°C</span>
+        </div>
+      `).join("")}
+    </div>
+  `;
+  return card;
 }
 
 function metricBarHTML(label, pct, valueText) {
@@ -263,14 +443,21 @@ function renderGPUDetail() {
   const container = document.getElementById("gpu-detail");
   container.innerHTML = "";
 
+  // All sources: RunAI clusters + DSMLP
+  const sources = [];
   for (const [name, info] of Object.entries(clusters)) {
-    if (!info.connected) continue;
+    if (info.connected) sources.push(name);
+  }
+  if (dsmlpConnected && dsmlpPod) sources.push("dsmlp");
+
+  for (const name of sources) {
     const m = metricsCache[name];
     if (!m || !m.gpu) continue;
 
+    const displayName = name === "dsmlp" ? "dsmlp (UCSD)" : name;
     const section = document.createElement("div");
     section.className = "gpu-cluster-section";
-    section.innerHTML = `<h3 class="gpu-cluster-heading"><span class="status-dot connected"></span>${name}</h3>`;
+    section.innerHTML = `<h3 class="gpu-cluster-heading"><span class="status-dot connected"></span>${displayName}</h3>`;
 
     const grid = document.createElement("div");
     grid.className = "gpu-grid";
@@ -302,7 +489,6 @@ function renderGPUDetail() {
     }
 
     section.appendChild(grid);
-
     container.appendChild(section);
   }
 
@@ -321,7 +507,8 @@ async function fetchProcesses() {
   const cluster = document.getElementById("proc-cluster-select").value;
   if (!cluster) return;
   try {
-    const resp = await fetch(`/api/processes/${cluster}`);
+    const url = cluster === "dsmlp" ? "/api/dsmlp/processes" : `/api/processes/${cluster}`;
+    const resp = await fetch(url);
     const data = await resp.json();
     currentProcesses = data.processes || [];
     renderProcessTable();
@@ -342,7 +529,6 @@ function renderProcessTable() {
     );
   }
 
-  // Sort
   procs.sort((a, b) => {
     let va = a[processSortKey], vb = b[processSortKey];
     if (["cpu", "mem", "rss", "pid"].includes(processSortKey)) {
@@ -390,21 +576,24 @@ function buildTerminalTabs() {
 
   const connectedClusters = Object.entries(clusters).filter(([, v]) => v.connected).map(([k]) => k);
 
+  // Add DSMLP
+  if (dsmlpConnected && dsmlpPod) {
+    connectedClusters.push("dsmlp");
+  }
+
   connectedClusters.forEach((name, i) => {
-    // Tab button
     const btn = document.createElement("button");
     btn.className = "term-tab" + (i === 0 ? " active" : "");
-    btn.textContent = name;
+    btn.textContent = name === "dsmlp" ? "dsmlp (UCSD)" : name;
+    btn.dataset.termName = name;
     btn.addEventListener("click", () => switchTerminal(name));
     tabsContainer.appendChild(btn);
 
-    // Terminal container div
     const div = document.createElement("div");
     div.className = "term-instance" + (i === 0 ? " active" : "");
     div.id = `term-${name}`;
     termContainer.appendChild(div);
 
-    // We lazy-init the actual terminal on first switch
     terminals[name] = { term: null, ws: null, fitAddon: null, initialized: false };
   });
 
@@ -416,7 +605,7 @@ function buildTerminalTabs() {
 function switchTerminal(name) {
   activeTerminal = name;
 
-  document.querySelectorAll(".term-tab").forEach((b) => b.classList.toggle("active", b.textContent === name));
+  document.querySelectorAll(".term-tab").forEach((b) => b.classList.toggle("active", b.dataset.termName === name));
   document.querySelectorAll(".term-instance").forEach((d) => d.classList.toggle("active", d.id === `term-${name}`));
 
   initTerminal(name);
@@ -440,46 +629,38 @@ function initTerminal(name) {
   term.open(container);
   fitAddon.fit();
 
-  // WebSocket
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(`${proto}//${location.host}/ws/terminal/${name}`);
+  const isDsmlp = name === "dsmlp";
+  const wsUrl = isDsmlp
+    ? `${proto}//${location.host}/ws/dsmlp/terminal`
+    : `${proto}//${location.host}/ws/terminal/${name}`;
+  const ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
-    term.writeln(`\x1b[32mConnected to ${name}\x1b[0m\r`);
-    // Send initial terminal size so remote shell knows dimensions
+    const displayName = isDsmlp ? "dsmlp (UCSD)" : name;
+    term.writeln(`\x1b[32mConnected to ${displayName}\x1b[0m\r`);
     ws.send(`\x01RESIZE:${term.cols},${term.rows}`);
-    // Auto-navigate and attach screen session if it exists
-    const projDir = projectConfig.directory || "/home/jovyan/vast/kaiwen/track-mjx";
-    const screenName = projectConfig.screen_session || "train-vqvae";
+
+    // Auto-navigate and attach screen session
+    const cfg = isDsmlp ? (dsmlpConfig.project || {}) : projectConfig;
+    const projDir = cfg.directory || "~";
+    const screenName = cfg.screen_session || "train-vqvae";
     setTimeout(() => {
       ws.send(`cd ${projDir}\n`);
-      setTimeout(() => ws.send(`screen -ls | grep -q ${screenName} && screen -xRR ${screenName}\n`), 300);
+      setTimeout(() => ws.send(`screen -ls | grep -q ${screenName} && screen -d -r ${screenName}\n`), 300);
     }, 500);
   };
 
-  ws.onmessage = (ev) => {
-    term.write(ev.data);
-  };
-
-  ws.onclose = () => {
-    term.writeln("\r\n\x1b[31mConnection closed.\x1b[0m");
-  };
-
-  ws.onerror = () => {
-    term.writeln("\r\n\x1b[31mWebSocket error.\x1b[0m");
-  };
+  ws.onmessage = (ev) => term.write(ev.data);
+  ws.onclose = () => term.writeln("\r\n\x1b[31mConnection closed.\x1b[0m");
+  ws.onerror = () => term.writeln("\r\n\x1b[31mWebSocket error.\x1b[0m");
 
   term.onData((data) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(data);
-    }
+    if (ws.readyState === WebSocket.OPEN) ws.send(data);
   });
 
-  // Send resize when terminal dimensions change
   term.onResize(({ cols, rows }) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(`\x01RESIZE:${cols},${rows}`);
-    }
+    if (ws.readyState === WebSocket.OPEN) ws.send(`\x01RESIZE:${cols},${rows}`);
   });
 
   terminals[name] = { term, ws, fitAddon, initialized: true };
@@ -487,13 +668,11 @@ function initTerminal(name) {
 
 function fitActiveTerminal() {
   if (!activeTerminal || !terminals[activeTerminal]?.fitAddon) return;
-  // Small delay to let the DOM update
   setTimeout(() => {
     try { terminals[activeTerminal].fitAddon.fit(); } catch (e) {}
   }, 50);
 }
 
-// Refit terminals on window resize
 window.addEventListener("resize", () => {
   fitActiveTerminal();
   fitClaudeTerminal();
@@ -505,7 +684,6 @@ function launchClaude() {
   const cluster = document.getElementById("claude-cluster-select").value;
   if (!cluster) return;
 
-  // Tear down existing claude terminal if switching clusters
   if (claudeTerminal) {
     if (claudeTerminal.ws) claudeTerminal.ws.close();
     if (claudeTerminal.term) claudeTerminal.term.dispose();
@@ -528,15 +706,22 @@ function launchClaude() {
   fitAddon.fit();
 
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(`${proto}//${location.host}/ws/terminal/${cluster}`);
+  const isDsmlp = cluster === "dsmlp";
+  const wsUrl = isDsmlp
+    ? `${proto}//${location.host}/ws/dsmlp/terminal`
+    : `${proto}//${location.host}/ws/terminal/${cluster}`;
+  const ws = new WebSocket(wsUrl);
 
   ws.onopen = () => {
-    term.writeln(`\x1b[32mConnected to ${cluster} — launching Claude...\x1b[0m\r`);
+    const displayName = isDsmlp ? "dsmlp (UCSD)" : cluster;
+    term.writeln(`\x1b[32mConnected to ${displayName} — launching Claude...\x1b[0m\r`);
     ws.send(`\x01RESIZE:${term.cols},${term.rows}`);
-    // Switch to devuser, cd to project, then attach or create screen session
-    const projDir = projectConfig.directory || "/home/jovyan/vast/kaiwen/track-mjx";
-    const claudeUser = projectConfig.claude_user || "devuser";
-    const claudeScreen = projectConfig.claude_screen_session || "claude";
+
+    const cfg = isDsmlp ? (dsmlpConfig.project || {}) : projectConfig;
+    const projDir = cfg.directory || "~";
+    const claudeUser = cfg.claude_user || "devuser";
+    const claudeScreen = cfg.claude_screen_session || "claude";
+
     setTimeout(() => {
       ws.send(`su - ${claudeUser}\n`);
       setTimeout(() => {
@@ -544,7 +729,7 @@ function launchClaude() {
         setTimeout(() => {
           ws.send(`cd ${projDir}\n`);
           setTimeout(() => {
-            ws.send(`screen -ls 2>/dev/null | grep -q '\\.${claudeScreen}\\b' && screen -r ${claudeScreen} || screen -S ${claudeScreen} bash -c 'claude --dangerously-skip-permissions; exec bash'\n`);
+            ws.send(`screen -ls 2>/dev/null | grep -q '\\.${claudeScreen}\\b' && screen -d -r ${claudeScreen} || screen -S ${claudeScreen} bash -c 'claude --dangerously-skip-permissions; exec bash'\n`);
           }, 300);
         }, 300);
       }, 300);
@@ -565,7 +750,6 @@ function launchClaude() {
 
   claudeTerminal = { term, ws, fitAddon, cluster };
 
-  // Load file explorer for this cluster
   initFileExplorer();
 }
 
@@ -582,12 +766,22 @@ function getFileCluster() {
   return document.getElementById("claude-cluster-select").value;
 }
 
+function fileApiUrl(endpoint, cluster) {
+  if (cluster === "dsmlp") {
+    return `/api/dsmlp/${endpoint}`;
+  }
+  return `/api/${endpoint}/${cluster}`;
+}
+
 async function loadFileTree(path, parentEl, depth) {
   const cluster = getFileCluster();
   if (!cluster) return;
 
   try {
-    const resp = await fetch(`/api/files/${cluster}?path=${encodeURIComponent(path)}`);
+    const url = cluster === "dsmlp"
+      ? `/api/dsmlp/files?path=${encodeURIComponent(path)}`
+      : `/api/files/${cluster}?path=${encodeURIComponent(path)}`;
+    const resp = await fetch(url);
     const data = await resp.json();
     if (data.error) return;
 
@@ -659,7 +853,10 @@ async function openFile(path, name) {
   viewer.classList.remove("hidden");
 
   try {
-    const resp = await fetch(`/api/file/${cluster}?path=${encodeURIComponent(path)}`);
+    const url = cluster === "dsmlp"
+      ? `/api/dsmlp/file?path=${encodeURIComponent(path)}`
+      : `/api/file/${cluster}?path=${encodeURIComponent(path)}`;
+    const resp = await fetch(url);
     const data = await resp.json();
     if (data.error) {
       contentEl.textContent = `Error: ${data.error}`;
@@ -684,13 +881,14 @@ function initFileExplorer() {
   const cluster = getFileCluster();
   if (!cluster) return;
 
-  const dir = projectConfig.directory || "/home/jovyan/vast/kaiwen/track-mjx";
+  const isDsmlp = cluster === "dsmlp";
+  const cfg = isDsmlp ? (dsmlpConfig.project || {}) : projectConfig;
+  const dir = cfg.directory || "~";
   document.getElementById("file-explorer-path").textContent = dir.split("/").filter(Boolean).pop() || dir;
   const tree = document.getElementById("file-tree");
   tree.innerHTML = `<div style="padding:12px;color:var(--text-dim);font-size:0.8rem">Loading...</div>`;
   loadFileTree("", tree, 0);
 
-  // Close button
   document.getElementById("file-viewer-close").onclick = () => {
     document.getElementById("file-viewer").classList.add("hidden");
   };
@@ -722,7 +920,6 @@ function applyTheme(theme) {
   document.getElementById("theme-toggle").textContent = emoji;
   document.getElementById("login-theme-toggle").textContent = emoji;
 
-  // Update all existing xterm instances
   const termTheme = TERM_THEMES[theme];
   Object.values(terminals).forEach(({ term }) => {
     if (term) term.options.theme = termTheme;

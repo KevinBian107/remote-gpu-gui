@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from config import CLUSTERS, PROJECT
+from config import CLUSTERS, PROJECT, DSMLP
 from ssh_manager import SSHManager
 
 ssh = SSHManager()
@@ -58,9 +58,10 @@ async def get_metrics(cluster: str):
     if not ssh.is_connected(cluster):
         return JSONResponse(content={"error": "Not connected"}, status_code=503)
 
+    executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
     try:
-        gpu = await asyncio.to_thread(_fetch_gpu_metrics, cluster)
-        system = await asyncio.to_thread(_fetch_system_metrics, cluster)
+        gpu = await asyncio.to_thread(_fetch_gpu_metrics, executor)
+        system = await asyncio.to_thread(_fetch_system_metrics, executor)
         return JSONResponse(content={"gpu": gpu, "system": system})
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
@@ -85,25 +86,80 @@ async def get_processes(cluster: str):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+# ── DSMLP REST endpoints ─────────────────────────────────────────────────────
+
+
+@app.post("/api/dsmlp/login")
+async def dsmlp_login():
+    result = await asyncio.to_thread(ssh.connect_dsmlp)
+    if not result["ok"]:
+        return JSONResponse(content={"connected": False, "error": result["error"]}, status_code=500)
+    pod = await asyncio.to_thread(ssh._detect_dsmlp_pod)
+    return JSONResponse(content={"connected": True, "pod": pod})
+
+
+@app.post("/api/dsmlp/launch")
+async def dsmlp_launch():
+    if not ssh.is_dsmlp_connected():
+        return JSONResponse(content={"ok": False, "error": "Not connected to DSMLP"}, status_code=503)
+    result = await asyncio.to_thread(ssh.launch_dsmlp_pod)
+    if not result["ok"]:
+        return JSONResponse(content=result, status_code=500)
+    return JSONResponse(content=result)
+
+
+@app.get("/api/dsmlp/status")
+async def dsmlp_status():
+    connected = ssh.is_dsmlp_connected()
+    pod = ssh._dsmlp_pod if connected else None
+    return JSONResponse(content={"connected": connected, "pod": pod})
+
+
+@app.get("/api/dsmlp/metrics")
+async def dsmlp_metrics():
+    if not ssh.is_dsmlp_connected():
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+    if not ssh._dsmlp_pod:
+        return JSONResponse(content={"error": "No running pod"}, status_code=503)
+
+    executor = lambda cmd, **kw: ssh.dsmlp_execute(cmd, **kw)
+    try:
+        gpu = await asyncio.to_thread(_fetch_gpu_metrics, executor)
+        system = await asyncio.to_thread(_fetch_system_metrics, executor)
+        return JSONResponse(content={"gpu": gpu, "system": system})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/api/dsmlp/processes")
+async def dsmlp_processes():
+    if not ssh.is_dsmlp_connected():
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+    if not ssh._dsmlp_pod:
+        return JSONResponse(content={"error": "No running pod"}, status_code=503)
+
+    try:
+        result = await asyncio.to_thread(
+            ssh.dsmlp_execute,
+            "ps aux --sort=-%mem | head -50",
+        )
+        processes = _parse_ps_aux(result["stdout"])
+        return JSONResponse(content={"processes": processes})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/api/dsmlp/config")
+async def dsmlp_config():
+    return JSONResponse(content={"dsmlp": DSMLP})
+
+
 # ── WebSocket terminal ────────────────────────────────────────────────────────
 
 
-@app.websocket("/ws/terminal/{cluster}")
-async def terminal_ws(ws: WebSocket, cluster: str):
-    await ws.accept()
-
-    if cluster not in CLUSTERS or not ssh.is_connected(cluster):
-        await ws.close(code=1008, reason="Not connected")
-        return
-
-    try:
-        channel = await asyncio.to_thread(ssh.get_interactive_channel, cluster)
-    except Exception as e:
-        await ws.close(code=1011, reason=str(e))
-        return
-
+async def _ws_terminal_bridge(ws: WebSocket, channel):
+    """Bidirectional bridge between a WebSocket and a paramiko channel."""
     async def read_from_ssh():
-        """Read from SSH channel and send to WebSocket."""
         loop = asyncio.get_event_loop()
         try:
             while True:
@@ -116,14 +172,12 @@ async def terminal_ws(ws: WebSocket, cluster: str):
             pass
 
     async def write_to_ssh():
-        """Read from WebSocket and write to SSH channel."""
         try:
             while True:
                 msg = await ws.receive()
                 if msg["type"] == "websocket.receive":
                     text = msg.get("text")
                     if text is not None:
-                        # Check for resize message
                         if text.startswith("\x01RESIZE:"):
                             try:
                                 parts = text[8:].split(",")
@@ -144,11 +198,44 @@ async def terminal_ws(ws: WebSocket, cluster: str):
 
     read_task = asyncio.create_task(read_from_ssh())
     write_task = asyncio.create_task(write_to_ssh())
-
     try:
         await asyncio.gather(read_task, write_task)
     finally:
         channel.close()
+
+
+@app.websocket("/ws/terminal/{cluster}")
+async def terminal_ws(ws: WebSocket, cluster: str):
+    await ws.accept()
+
+    if cluster not in CLUSTERS or not ssh.is_connected(cluster):
+        await ws.close(code=1008, reason="Not connected")
+        return
+
+    try:
+        channel = await asyncio.to_thread(ssh.get_interactive_channel, cluster)
+    except Exception as e:
+        await ws.close(code=1011, reason=str(e))
+        return
+
+    await _ws_terminal_bridge(ws, channel)
+
+
+@app.websocket("/ws/dsmlp/terminal")
+async def dsmlp_terminal_ws(ws: WebSocket):
+    await ws.accept()
+
+    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
+        await ws.close(code=1008, reason="DSMLP not connected or no pod")
+        return
+
+    try:
+        channel = await asyncio.to_thread(ssh.get_dsmlp_interactive_channel)
+    except Exception as e:
+        await ws.close(code=1011, reason=str(e))
+        return
+
+    await _ws_terminal_bridge(ws, channel)
 
 
 def _channel_recv(channel) -> str | None:
@@ -169,13 +256,14 @@ def _channel_recv(channel) -> str | None:
 # ── Metric parsers ────────────────────────────────────────────────────────────
 
 
-def _fetch_gpu_metrics(cluster: str) -> list[dict]:
+def _fetch_gpu_metrics(execute) -> list[dict]:
+    """Fetch GPU metrics. `execute` is a callable: execute(cmd, **kw) -> {stdout, stderr, exit_code}."""
     query = (
         "nvidia-smi --query-gpu="
         "index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw"
         " --format=csv,noheader,nounits"
     )
-    result = ssh.execute(cluster, query)
+    result = execute(query)
     gpus = []
     for line in result["stdout"].strip().splitlines():
         parts = [p.strip() for p in line.split(",")]
@@ -191,13 +279,11 @@ def _fetch_gpu_metrics(cluster: str) -> list[dict]:
             })
 
     # Get per-GPU process info
-    proc_result = ssh.execute(
-        cluster,
+    proc_result = execute(
         "nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory,name --format=csv,noheader,nounits 2>/dev/null || true",
     )
     # Also get GPU UUID mapping
-    uuid_result = ssh.execute(
-        cluster,
+    uuid_result = execute(
         "nvidia-smi --query-gpu=index,uuid --format=csv,noheader",
     )
     uuid_to_idx = {}
@@ -225,25 +311,23 @@ def _fetch_gpu_metrics(cluster: str) -> list[dict]:
     return gpus
 
 
-def _fetch_system_metrics(cluster: str) -> dict:
+def _fetch_system_metrics(execute) -> dict:
+    """Fetch system metrics. `execute` is a callable: execute(cmd, **kw) -> {stdout, stderr, exit_code}."""
     # CPU usage (1-min load average / nproc)
-    cpu_result = ssh.execute(
-        cluster,
-        "nproc && cat /proc/loadavg",
-    )
+    cpu_result = execute("nproc && cat /proc/loadavg")
     lines = cpu_result["stdout"].strip().splitlines()
     nproc = int(lines[0]) if lines else 1
     load_1m = float(lines[1].split()[0]) if len(lines) > 1 else 0.0
     cpu_percent = min(round(load_1m / nproc * 100, 1), 100.0)
 
     # Memory
-    mem_result = ssh.execute(cluster, "free -m | grep Mem:")
+    mem_result = execute("free -m | grep Mem:")
     mem_parts = mem_result["stdout"].split()
     mem_total = int(mem_parts[1]) if len(mem_parts) > 1 else 0
     mem_used = int(mem_parts[2]) if len(mem_parts) > 2 else 0
 
     # Disk
-    disk_result = ssh.execute(cluster, "df -h / | tail -1")
+    disk_result = execute("df -h / | tail -1")
     disk_parts = disk_result["stdout"].split()
     disk_total = disk_parts[1] if len(disk_parts) > 1 else "?"
     disk_used = disk_parts[2] if len(disk_parts) > 2 else "?"
@@ -294,28 +378,23 @@ def _safe_float(s: str) -> float:
 
 # ── File browser ─────────────────────────────────────────────────────────────
 
-def _file_root() -> str:
-    return PROJECT.get("directory", "/home/jovyan/vast/kaiwen/track-mjx")
+import posixpath
 
 
-@app.get("/api/files/{cluster}")
-async def list_files(cluster: str, path: str = ""):
-    if cluster not in CLUSTERS:
-        return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
-    if not ssh.is_connected(cluster):
-        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+def _file_root(for_dsmlp=False) -> str:
+    if for_dsmlp:
+        proj = DSMLP.get("project", {})
+        return proj.get("directory", ".")
+    return PROJECT.get("directory", ".")
 
-    import posixpath
-    root = _file_root()
+
+async def _list_files_with_executor(execute, root, path):
     full = posixpath.normpath(posixpath.join(root, path))
     if not full.startswith(root):
         return JSONResponse(content={"error": "Invalid path"}, status_code=400)
 
     try:
-        result = await asyncio.to_thread(
-            ssh.execute, cluster,
-            f"ls -1pA {full!r}",
-        )
+        result = await asyncio.to_thread(execute, f"ls -1pA {full!r}")
         if result["exit_code"] != 0:
             return JSONResponse(content={"error": result["stderr"].strip()}, status_code=400)
 
@@ -333,6 +412,32 @@ async def list_files(cluster: str, path: str = ""):
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+async def _read_file_with_executor(execute, root, path):
+    full = posixpath.normpath(posixpath.join(root, path))
+    if not full.startswith(root):
+        return JSONResponse(content={"error": "Invalid path"}, status_code=400)
+
+    try:
+        result = await asyncio.to_thread(execute, f"head -c 512000 {full!r}")
+        if result["exit_code"] != 0:
+            return JSONResponse(content={"error": result["stderr"].strip()}, status_code=400)
+
+        return JSONResponse(content={"path": path, "content": result["stdout"]})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/api/files/{cluster}")
+async def list_files(cluster: str, path: str = ""):
+    if cluster not in CLUSTERS:
+        return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
+    if not ssh.is_connected(cluster):
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
+    return await _list_files_with_executor(executor, _file_root(), path)
+
+
 @app.get("/api/file/{cluster}")
 async def read_file(cluster: str, path: str = ""):
     if cluster not in CLUSTERS:
@@ -340,24 +445,24 @@ async def read_file(cluster: str, path: str = ""):
     if not ssh.is_connected(cluster):
         return JSONResponse(content={"error": "Not connected"}, status_code=503)
 
-    import posixpath
-    root = _file_root()
-    full = posixpath.normpath(posixpath.join(root, path))
-    if not full.startswith(root):
-        return JSONResponse(content={"error": "Invalid path"}, status_code=400)
+    executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
+    return await _read_file_with_executor(executor, _file_root(), path)
 
-    try:
-        result = await asyncio.to_thread(
-            ssh.execute, cluster,
-            f"head -c 512000 {full!r}",
-            timeout=10,
-        )
-        if result["exit_code"] != 0:
-            return JSONResponse(content={"error": result["stderr"].strip()}, status_code=400)
 
-        return JSONResponse(content={"path": path, "content": result["stdout"]})
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+@app.get("/api/dsmlp/files")
+async def dsmlp_list_files(path: str = ""):
+    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    return await _list_files_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), path)
+
+
+@app.get("/api/dsmlp/file")
+async def dsmlp_read_file(path: str = ""):
+    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    return await _read_file_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), path)
 
 
 # ── Static files (must be last) ──────────────────────────────────────────────

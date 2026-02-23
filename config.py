@@ -8,3 +8,4 @@ with open(_cfg_path) as f:
 SERVER = _cfg.get("server", {})
 PROJECT = _cfg.get("project", {})
 CLUSTERS = _cfg.get("clusters", {})
+DSMLP = _cfg.get("dsmlp", {})

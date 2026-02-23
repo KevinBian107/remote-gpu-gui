@@ -31,3 +31,17 @@ clusters:
     host: 10.7.30.112
     port: 31658
     username: root
+
+# ── DSMLP (UCSD) ────────────────────────────────────────────────────────────
+dsmlp:
+  host: dsmlp-login.ucsd.edu
+  port: 22
+  username: kbian
+  key_path: ~/.ssh/id_ed25519
+  launch_command: "launch-scipy-ml.sh -W DSC180A_FA25_A00 -g 4 -p low -c 8 -m 64 -n 31 -b"
+  project:
+    directory: private/MOSAIC
+    screen_session: train-vqvae
+    claude_screen_session: claude
+    claude_user: devuser
+  auth_guide: "https://github.com/KevinBian107/DSC180-Toolbox"

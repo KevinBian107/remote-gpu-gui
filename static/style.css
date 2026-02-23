@@ -113,11 +113,30 @@ body {
   letter-spacing: -0.01em;
 }
 
-.login-box p {
+.login-box > p {
   color: var(--text-dim);
   font-size: 0.875rem;
-  margin-bottom: 24px;
+  margin-bottom: 20px;
   line-height: 1.5;
+}
+
+.login-box select {
+  width: 100%;
+  padding: 10px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  color: var(--text);
+  font-size: 0.9rem;
+  margin-bottom: 14px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color var(--transition);
+}
+
+.login-box select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
 
 .login-box input {
@@ -154,6 +173,24 @@ body {
 .login-box button:hover { background: var(--accent-hover); }
 .login-box button:disabled { opacity: 0.5; cursor: not-allowed; }
 
+.dsmlp-note {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  margin-bottom: 14px;
+  line-height: 1.5;
+  padding: 10px;
+  background: var(--bg);
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+}
+
+.dsmlp-note a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.dsmlp-note a:hover { text-decoration: underline; }
+
 #login-status {
   margin-top: 18px;
   font-size: 0.8rem;
@@ -163,6 +200,12 @@ body {
 }
 
 #login-status.error { color: var(--red); }
+#login-status.success { color: var(--green); }
+#login-status.launching { color: var(--yellow); }
+
+#dsmlp-launch-btn {
+  margin-top: 10px;
+}
 
 .login-theme-btn {
   position: absolute;
@@ -230,6 +273,15 @@ body {
 }
 
 #cluster-list li:hover { background: var(--bg-hover); }
+
+#cluster-list li.sidebar-separator {
+  height: 1px;
+  background: var(--border);
+  margin: 8px 10px;
+  padding: 0;
+}
+
+#cluster-list li.sidebar-separator:hover { background: var(--border); }
 
 .status-dot {
   width: 7px;

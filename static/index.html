@@ -15,10 +15,21 @@
     <div class="login-box">
       <span class="login-icon">🖥️</span>
       <h1>GPU Cluster Dashboard</h1>
-      <p>Enter your SSH password to connect to all clusters.</p>
-      <input type="password" id="password-input" placeholder="SSH password" autofocus>
+      <p>Select a cluster and connect.</p>
+      <select id="login-mode">
+        <option value="runai">RunAI (Salk) — SSH password</option>
+        <option value="dsmlp">DSMLP (UCSD) — SSH key + Duo</option>
+        <option value="both">Both</option>
+      </select>
+      <div id="runai-fields">
+        <input type="password" id="password-input" placeholder="SSH password" autofocus>
+      </div>
+      <div id="dsmlp-fields" class="hidden">
+        <p class="dsmlp-note">Uses SSH key auth. A Duo push will be sent — approve on your phone. <a href="https://github.com/KevinBian107/DSC180-Toolbox" target="_blank">Setup guide</a></p>
+      </div>
       <button id="login-btn">Connect</button>
       <div id="login-status"></div>
+      <button id="dsmlp-launch-btn" class="hidden">Launch Pod</button>
     </div>
   </div>
 
