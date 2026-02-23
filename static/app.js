@@ -33,8 +33,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // Logout
   document.getElementById("logout-btn").addEventListener("click", doLogout);
 
-  // Theme toggle
+  // Theme toggle (both login screen and dashboard)
   document.getElementById("theme-toggle").addEventListener("click", toggleTheme);
+  document.getElementById("login-theme-toggle").addEventListener("click", toggleTheme);
   loadTheme();
 
   // Cluster select change
@@ -209,7 +210,7 @@ function renderOverview() {
 
     const m = metricsCache[name];
     if (!info.connected || !m) {
-      card.innerHTML = `<h3><span class="status-dot disconnected"></span>${name}</h3><p style="color:var(--text-dim)">Not connected</p>`;
+      card.innerHTML = `<h3><span class="status-dot disconnected"></span>${name}</h3><p class="not-connected-msg">Not connected</p>`;
       container.appendChild(card);
       continue;
     }
@@ -269,7 +270,10 @@ function renderGPUDetail() {
 
     const section = document.createElement("div");
     section.className = "gpu-cluster-section";
-    section.innerHTML = `<h3 class="gpu-cluster-heading">${name}</h3>`;
+    section.innerHTML = `<h3 class="gpu-cluster-heading"><span class="status-dot connected"></span>${name}</h3>`;
+
+    const grid = document.createElement("div");
+    grid.className = "gpu-grid";
 
     for (const g of m.gpu) {
       const memPct = g.memory_total ? Math.round(g.memory_used / g.memory_total * 100) : 0;
@@ -279,17 +283,13 @@ function renderGPUDetail() {
         <h4>GPU ${g.index}: ${g.name}</h4>
         ${metricBarHTML("Utilization", Math.round(g.utilization))}
         ${metricBarHTML("Memory", memPct, `${Math.round(g.memory_used)} / ${Math.round(g.memory_total)} MiB`)}
-        <div class="metric-row">
-          <span class="metric-label">Temperature</span>
-          <span class="metric-value">${g.temperature}°C</span>
-        </div>
-        <div class="metric-row">
-          <span class="metric-label">Power</span>
-          <span class="metric-value">${g.power_draw} W</span>
+        <div class="gpu-stats-inline">
+          <span class="gpu-stat"><strong>${g.temperature}°C</strong> temp</span>
+          <span class="gpu-stat"><strong>${g.power_draw} W</strong> power</span>
         </div>
         <div class="gpu-processes">
           <h5>Processes (${g.processes.length})</h5>
-          ${g.processes.length === 0 ? "<p style='color:var(--text-dim);font-size:0.8rem'>No compute processes</p>" :
+          ${g.processes.length === 0 ? '<p class="no-processes">No compute processes</p>' :
             g.processes.map((p) => `
               <div class="gpu-proc-row">
                 <span>PID ${p.pid}: ${p.name}</span>
@@ -298,8 +298,10 @@ function renderGPUDetail() {
             `).join("")}
         </div>
       `;
-      section.appendChild(card);
+      grid.appendChild(card);
     }
+
+    section.appendChild(grid);
 
     container.appendChild(section);
   }
@@ -699,8 +701,8 @@ function initFileExplorer() {
 const THEME_KEY = "gpu-dashboard-theme";
 
 const TERM_THEMES = {
-  dark: { background: "#1e1e1e", foreground: "#cccccc", cursor: "#007acc", selectionBackground: "#264f78" },
-  light: { background: "#ffffff", foreground: "#333333", cursor: "#007acc", selectionBackground: "#add6ff" },
+  dark:  { background: "#1e1e1e", foreground: "#d4d4d4", cursor: "#d4d4d4", cursorAccent: "#1e1e1e", selectionBackground: "#264f78" },
+  light: { background: "#ffffff", foreground: "#333333", cursor: "#333333", cursorAccent: "#ffffff", selectionBackground: "#add6ff" },
 };
 
 function loadTheme() {
@@ -716,7 +718,9 @@ function toggleTheme() {
 function applyTheme(theme) {
   document.documentElement.setAttribute("data-theme", theme);
   localStorage.setItem(THEME_KEY, theme);
-  document.getElementById("theme-toggle").textContent = theme === "dark" ? "☀️" : "🌙";
+  const emoji = theme === "dark" ? "☀️" : "🌙";
+  document.getElementById("theme-toggle").textContent = emoji;
+  document.getElementById("login-theme-toggle").textContent = emoji;
 
   // Update all existing xterm instances
   const termTheme = TERM_THEMES[theme];

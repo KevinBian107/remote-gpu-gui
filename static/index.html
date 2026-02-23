@@ -11,7 +11,9 @@
 <body>
   <!-- Login screen -->
   <div id="login-screen">
+    <button id="login-theme-toggle" class="login-theme-btn">🌙</button>
     <div class="login-box">
+      <span class="login-icon">🖥️</span>
       <h1>GPU Cluster Dashboard</h1>
       <p>Enter your SSH password to connect to all clusters.</p>
       <input type="password" id="password-input" placeholder="SSH password" autofocus>
@@ -26,8 +28,10 @@
     <aside id="sidebar">
       <h2>Clusters</h2>
       <ul id="cluster-list"></ul>
-      <button id="logout-btn">Disconnect</button>
-      <button id="theme-toggle">🌙</button>
+      <div class="sidebar-actions">
+        <button id="logout-btn">Disconnect</button>
+        <button id="theme-toggle">🌙</button>
+      </div>
     </aside>
 
     <!-- Main content -->
@@ -100,7 +104,7 @@
             <div id="file-viewer" class="hidden">
               <div id="file-viewer-header">
                 <span id="file-viewer-name"></span>
-                <button id="file-viewer-close">x</button>
+                <button id="file-viewer-close">✕</button>
               </div>
               <div id="file-viewer-content"></div>
             </div>
