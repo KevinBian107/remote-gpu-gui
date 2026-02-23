@@ -288,6 +288,15 @@ body {
 
 /* ── GPU detail ───────────────────────────────────────────────────────────── */
 
+.gpu-cluster-section { margin-bottom: 24px; }
+
+.gpu-cluster-heading {
+  font-size: 1.1rem;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
 .gpu-card {
   background: var(--bg-card);
   border: 1px solid var(--border);

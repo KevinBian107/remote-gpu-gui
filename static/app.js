@@ -31,8 +31,7 @@ document.addEventListener("DOMContentLoaded", () => {
   // Logout
   document.getElementById("logout-btn").addEventListener("click", doLogout);
 
-  // Cluster select changes
-  document.getElementById("gpu-cluster-select").addEventListener("change", renderGPUDetail);
+  // Cluster select change
   document.getElementById("proc-cluster-select").addEventListener("change", fetchProcesses);
 });
 
@@ -119,8 +118,7 @@ async function enterDashboard() {
     list.appendChild(li);
   }
 
-  // Populate cluster selects
-  populateSelect("gpu-cluster-select");
+  // Populate cluster select for processes tab
   populateSelect("proc-cluster-select");
 
   // Build terminal tabs
@@ -169,6 +167,10 @@ async function fetchAllMetrics() {
     }
   }
   renderOverview();
+  // Also refresh GPU detail if that tab is active
+  if (document.getElementById("tab-gpu").classList.contains("active")) {
+    renderGPUDetail();
+  }
 }
 
 /* ── Overview rendering ───────────────────────────────────────────────────── */
@@ -233,41 +235,53 @@ function metricBarHTML(label, pct, valueText) {
 /* ── GPU detail ───────────────────────────────────────────────────────────── */
 
 function renderGPUDetail() {
-  const cluster = document.getElementById("gpu-cluster-select").value;
   const container = document.getElementById("gpu-detail");
   container.innerHTML = "";
 
-  const m = metricsCache[cluster];
-  if (!m || !m.gpu) { container.innerHTML = "<p>No data.</p>"; return; }
+  for (const [name, info] of Object.entries(clusters)) {
+    if (!info.connected) continue;
+    const m = metricsCache[name];
+    if (!m || !m.gpu) continue;
 
-  for (const g of m.gpu) {
-    const memPct = g.memory_total ? Math.round(g.memory_used / g.memory_total * 100) : 0;
-    const card = document.createElement("div");
-    card.className = "gpu-card";
-    card.innerHTML = `
-      <h4>GPU ${g.index}: ${g.name}</h4>
-      ${metricBarHTML("Utilization", Math.round(g.utilization))}
-      ${metricBarHTML("Memory", memPct, `${Math.round(g.memory_used)} / ${Math.round(g.memory_total)} MiB`)}
-      <div class="metric-row">
-        <span class="metric-label">Temperature</span>
-        <span class="metric-value">${g.temperature}°C</span>
-      </div>
-      <div class="metric-row">
-        <span class="metric-label">Power</span>
-        <span class="metric-value">${g.power_draw} W</span>
-      </div>
-      <div class="gpu-processes">
-        <h5>Processes (${g.processes.length})</h5>
-        ${g.processes.length === 0 ? "<p style='color:var(--text-dim);font-size:0.8rem'>No compute processes</p>" :
-          g.processes.map((p) => `
-            <div class="gpu-proc-row">
-              <span>PID ${p.pid}: ${p.name}</span>
-              <span>${p.memory_mib} MiB</span>
-            </div>
-          `).join("")}
-      </div>
-    `;
-    container.appendChild(card);
+    const section = document.createElement("div");
+    section.className = "gpu-cluster-section";
+    section.innerHTML = `<h3 class="gpu-cluster-heading">${name}</h3>`;
+
+    for (const g of m.gpu) {
+      const memPct = g.memory_total ? Math.round(g.memory_used / g.memory_total * 100) : 0;
+      const card = document.createElement("div");
+      card.className = "gpu-card";
+      card.innerHTML = `
+        <h4>GPU ${g.index}: ${g.name}</h4>
+        ${metricBarHTML("Utilization", Math.round(g.utilization))}
+        ${metricBarHTML("Memory", memPct, `${Math.round(g.memory_used)} / ${Math.round(g.memory_total)} MiB`)}
+        <div class="metric-row">
+          <span class="metric-label">Temperature</span>
+          <span class="metric-value">${g.temperature}°C</span>
+        </div>
+        <div class="metric-row">
+          <span class="metric-label">Power</span>
+          <span class="metric-value">${g.power_draw} W</span>
+        </div>
+        <div class="gpu-processes">
+          <h5>Processes (${g.processes.length})</h5>
+          ${g.processes.length === 0 ? "<p style='color:var(--text-dim);font-size:0.8rem'>No compute processes</p>" :
+            g.processes.map((p) => `
+              <div class="gpu-proc-row">
+                <span>PID ${p.pid}: ${p.name}</span>
+                <span>${p.memory_mib} MiB</span>
+              </div>
+            `).join("")}
+        </div>
+      `;
+      section.appendChild(card);
+    }
+
+    container.appendChild(section);
+  }
+
+  if (!container.children.length) {
+    container.innerHTML = "<p>No GPU data available.</p>";
   }
 }
 

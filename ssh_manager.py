@@ -10,7 +10,8 @@ class SSHManager:
         self._lock = threading.Lock()
 
     def connect(self, cluster_name: str, password: str) -> dict:
-        """Connect to a cluster. Returns {"ok": True} or {"ok": False, "error": "..."}."""
+        """Connect to a cluster using password auth.
+        Returns {"ok": True} or {"ok": False, "error": "..."}."""
         cfg = CLUSTERS.get(cluster_name)
         if not cfg:
             return {"ok": False, "error": f"Unknown cluster: {cluster_name}"}
@@ -23,6 +24,8 @@ class SSHManager:
                 port=cfg["port"],
                 username=cfg["username"],
                 password=password,
+                look_for_keys=False,
+                allow_agent=False,
                 timeout=10,
             )
             with self._lock:
