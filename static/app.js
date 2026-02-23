@@ -5,6 +5,7 @@ let metricsCache = {};      // {name: {gpu: [...], system: {...}}}
 let pollInterval = null;
 let terminals = {};          // {name: {term, ws, fitAddon}}
 let activeTerminal = null;
+let claudeTerminal = null;  // {term, ws, fitAddon, cluster}
 
 /* ── Boot ──────────────────────────────────────────────────────────────────── */
 
@@ -33,6 +34,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
   // Cluster select change
   document.getElementById("proc-cluster-select").addEventListener("change", fetchProcesses);
+
+  // Claude tab
+  document.getElementById("claude-connect-btn").addEventListener("click", launchClaude);
 });
 
 /* ── Login / Logout ───────────────────────────────────────────────────────── */
@@ -89,6 +93,14 @@ function doLogout() {
   terminals = {};
   activeTerminal = null;
 
+  // Close claude terminal
+  if (claudeTerminal) {
+    if (claudeTerminal.ws) claudeTerminal.ws.close();
+    if (claudeTerminal.term) claudeTerminal.term.dispose();
+    claudeTerminal = null;
+  }
+  document.getElementById("claude-terminal-container").innerHTML = "";
+
   if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
 
   document.getElementById("dashboard").classList.add("hidden");
@@ -118,8 +130,9 @@ async function enterDashboard() {
     list.appendChild(li);
   }
 
-  // Populate cluster select for processes tab
+  // Populate cluster selects
   populateSelect("proc-cluster-select");
+  populateSelect("claude-cluster-select");
 
   // Build terminal tabs
   buildTerminalTabs();
@@ -151,6 +164,7 @@ function switchTab(tab) {
   if (tab === "gpu") renderGPUDetail();
   if (tab === "processes") fetchProcesses();
   if (tab === "terminal") fitActiveTerminal();
+  if (tab === "claude") fitClaudeTerminal();
 }
 
 /* ── Metrics polling ──────────────────────────────────────────────────────── */
@@ -425,6 +439,13 @@ function initTerminal(name) {
 
   ws.onopen = () => {
     term.writeln(`\x1b[32mConnected to ${name}\x1b[0m\r`);
+    // Send initial terminal size so remote shell knows dimensions
+    ws.send(`\x01RESIZE:${term.cols},${term.rows}`);
+    // Auto-navigate and attach screen session if it exists
+    setTimeout(() => {
+      ws.send("cd /home/jovyan/vast/kaiwen/track-mjx\n");
+      setTimeout(() => ws.send("screen -ls | grep -q train-vqvae && screen -xRR train-vqvae\n"), 300);
+    }, 500);
   };
 
   ws.onmessage = (ev) => {
@@ -445,6 +466,13 @@ function initTerminal(name) {
     }
   });
 
+  // Send resize when terminal dimensions change
+  term.onResize(({ cols, rows }) => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(`\x01RESIZE:${cols},${rows}`);
+    }
+  });
+
   terminals[name] = { term, ws, fitAddon, initialized: true };
 }
 
@@ -457,7 +485,87 @@ function fitActiveTerminal() {
 }
 
 // Refit terminals on window resize
-window.addEventListener("resize", fitActiveTerminal);
+window.addEventListener("resize", () => {
+  fitActiveTerminal();
+  fitClaudeTerminal();
+});
+
+/* ── Claude terminal ──────────────────────────────────────────────────────── */
+
+function launchClaude() {
+  const cluster = document.getElementById("claude-cluster-select").value;
+  if (!cluster) return;
+
+  // Tear down existing claude terminal if switching clusters
+  if (claudeTerminal) {
+    if (claudeTerminal.ws) claudeTerminal.ws.close();
+    if (claudeTerminal.term) claudeTerminal.term.dispose();
+    claudeTerminal = null;
+  }
+
+  const container = document.getElementById("claude-terminal-container");
+  container.innerHTML = "";
+
+  const term = new Terminal({
+    cursorBlink: true,
+    fontSize: 14,
+    fontFamily: "'SF Mono', Menlo, Monaco, 'Courier New', monospace",
+    theme: {
+      background: "#0d1117",
+      foreground: "#e6edf3",
+      cursor: "#58a6ff",
+      selectionBackground: "#264f78",
+    },
+  });
+
+  const fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+  term.open(container);
+  fitAddon.fit();
+
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(`${proto}//${location.host}/ws/terminal/${cluster}`);
+
+  ws.onopen = () => {
+    term.writeln(`\x1b[32mConnected to ${cluster} — launching Claude...\x1b[0m\r`);
+    ws.send(`\x01RESIZE:${term.cols},${term.rows}`);
+    // Switch to devuser, cd to project, then attach or create screen session
+    setTimeout(() => {
+      ws.send("su - devuser\n");
+      setTimeout(() => {
+        ws.send("exec bash\n");
+        setTimeout(() => {
+          ws.send("cd /home/jovyan/vast/kaiwen/track-mjx/\n");
+          setTimeout(() => {
+            // Attach if screen exists, otherwise create and run claude
+            ws.send("screen -ls 2>/dev/null | grep -q '\\.claude\\b' && screen -r claude || screen -S claude bash -c 'claude --dangerously-skip-permissions; exec bash'\n");
+          }, 300);
+        }, 300);
+      }, 300);
+    }, 500);
+  };
+
+  ws.onmessage = (ev) => term.write(ev.data);
+  ws.onclose = () => term.writeln("\r\n\x1b[31mConnection closed.\x1b[0m");
+  ws.onerror = () => term.writeln("\r\n\x1b[31mWebSocket error.\x1b[0m");
+
+  term.onData((data) => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(data);
+  });
+
+  term.onResize(({ cols, rows }) => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(`\x01RESIZE:${cols},${rows}`);
+  });
+
+  claudeTerminal = { term, ws, fitAddon, cluster };
+}
+
+function fitClaudeTerminal() {
+  if (!claudeTerminal?.fitAddon) return;
+  setTimeout(() => {
+    try { claudeTerminal.fitAddon.fit(); } catch (e) {}
+  }, 50);
+}
 
 /* ── Utility ──────────────────────────────────────────────────────────────── */
 

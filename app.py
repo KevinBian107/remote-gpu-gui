@@ -114,8 +114,26 @@ async def terminal_ws(ws: WebSocket, cluster: str):
         """Read from WebSocket and write to SSH channel."""
         try:
             while True:
-                data = await ws.receive_text()
-                channel.sendall(data.encode())
+                msg = await ws.receive()
+                if msg["type"] == "websocket.receive":
+                    text = msg.get("text")
+                    if text is not None:
+                        # Check for resize message
+                        if text.startswith("\x01RESIZE:"):
+                            try:
+                                parts = text[8:].split(",")
+                                cols, rows = int(parts[0]), int(parts[1])
+                                channel.resize_pty(width=cols, height=rows)
+                            except (ValueError, IndexError):
+                                pass
+                        else:
+                            channel.sendall(text.encode())
+                    else:
+                        data = msg.get("bytes")
+                        if data:
+                            channel.sendall(data)
+                elif msg["type"] == "websocket.disconnect":
+                    break
         except (WebSocketDisconnect, Exception):
             pass
 

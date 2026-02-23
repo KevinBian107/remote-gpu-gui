@@ -408,3 +408,25 @@ body {
 }
 
 .term-instance.active { display: block; }
+
+/* ── Claude terminal ──────────────────────────────────────────────────────── */
+
+#claude-terminal-container {
+  flex: 1;
+  background: #000;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+#claude-connect-btn {
+  padding: 6px 16px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+#claude-connect-btn:hover { opacity: 0.9; }

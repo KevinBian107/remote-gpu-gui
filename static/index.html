@@ -36,6 +36,7 @@
         <button class="tab" data-tab="gpu">GPU Detail</button>
         <button class="tab" data-tab="processes">Processes</button>
         <button class="tab" data-tab="terminal">Terminal</button>
+        <button class="tab" data-tab="claude">Claude</button>
       </nav>
 
       <!-- Overview tab -->
@@ -77,6 +78,17 @@
       <section id="tab-terminal" class="tab-content">
         <div id="terminal-tabs"></div>
         <div id="terminal-container"></div>
+      </section>
+
+      <!-- Claude tab -->
+      <section id="tab-claude" class="tab-content">
+        <div class="tab-toolbar">
+          <label>Cluster:
+            <select id="claude-cluster-select"></select>
+          </label>
+          <button id="claude-connect-btn">Launch</button>
+        </div>
+        <div id="claude-terminal-container"></div>
       </section>
     </main>
   </div>
