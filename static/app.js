@@ -11,6 +11,16 @@ let dsmlpConfig = {};       // from /api/dsmlp/config
 let dsmlpConnected = false;
 let dsmlpPod = null;
 
+const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"]);
+function isImageFile(name) {
+  const dotIdx = name.lastIndexOf(".");
+  if (dotIdx === -1) return false;
+  const ext = name.substring(dotIdx).toLowerCase();
+  return IMAGE_EXTENSIONS.has(ext);
+}
+let currentOpenFilePath = null;
+let resizeHandleInitialized = false;
+
 /* ── Boot ──────────────────────────────────────────────────────────────────── */
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -751,6 +761,7 @@ function launchClaude() {
   claudeTerminal = { term, ws, fitAddon, cluster };
 
   initFileExplorer();
+  initResizeHandle();
 }
 
 function fitClaudeTerminal() {
@@ -795,7 +806,17 @@ async function loadFileTree(path, parentEl, depth) {
 
         const row = document.createElement("div");
         row.className = "file-entry dir";
-        row.innerHTML = `<span class="file-icon">&#9656;</span>${esc(entry.name)}`;
+        row.innerHTML = `<span class="file-icon">&#9656;</span><span class="file-name">${esc(entry.name)}</span>`;
+
+        // Visible action buttons
+        const actions = document.createElement("span");
+        actions.className = "file-actions";
+        actions.innerHTML = `<button class="file-action-btn" title="New File">+</button><button class="file-action-btn" title="Rename">✏</button><button class="file-action-btn" title="Delete">✕</button>`;
+        const [newBtn, renBtn, delBtn] = actions.querySelectorAll("button");
+        newBtn.addEventListener("click", (e) => { e.stopPropagation(); createNewItem(entryPath, false); });
+        renBtn.addEventListener("click", (e) => { e.stopPropagation(); renameFile(entryPath, entry.name); });
+        delBtn.addEventListener("click", (e) => { e.stopPropagation(); deleteFile(entryPath, entry.name, true); });
+        row.appendChild(actions);
 
         const children = document.createElement("div");
         children.className = "file-children";
@@ -810,6 +831,12 @@ async function loadFileTree(path, parentEl, depth) {
           row.querySelector(".file-icon").innerHTML = isOpen ? "&#9662;" : "&#9656;";
         });
 
+        row.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          showContextMenu(e, entryPath, entry.name, true);
+        });
+
         wrapper.appendChild(row);
         wrapper.appendChild(children);
         parentEl.appendChild(wrapper);
@@ -818,17 +845,36 @@ async function loadFileTree(path, parentEl, depth) {
         wrapper.className = `depth-${depth}`;
 
         const isMd = entry.name.endsWith(".md");
+        const isImg = isImageFile(entry.name);
         const row = document.createElement("div");
         row.className = `file-entry${isMd ? " md-file" : ""}`;
 
         let icon = "&#128196;";
-        if (isMd) icon = "&#128214;";
+        if (isImg) icon = "&#128247;";
+        else if (isMd) icon = "&#128214;";
         else if (entry.name.endsWith(".py")) icon = "&#128013;";
         else if (entry.name.endsWith(".yaml") || entry.name.endsWith(".yml")) icon = "&#9881;";
         else if (entry.name.endsWith(".json")) icon = "{ }";
 
-        row.innerHTML = `<span class="file-icon">${icon}</span>${esc(entry.name)}`;
+        row.innerHTML = `<span class="file-icon">${icon}</span><span class="file-name">${esc(entry.name)}</span>`;
+
+        // Visible action buttons
+        const actions = document.createElement("span");
+        actions.className = "file-actions";
+        actions.innerHTML = `<button class="file-action-btn" title="Download">⬇</button><button class="file-action-btn" title="Rename">✏</button><button class="file-action-btn" title="Delete">✕</button>`;
+        const [dlBtn, renBtn, delBtn] = actions.querySelectorAll("button");
+        dlBtn.addEventListener("click", (e) => { e.stopPropagation(); downloadFile(entryPath, entry.name); });
+        renBtn.addEventListener("click", (e) => { e.stopPropagation(); renameFile(entryPath, entry.name); });
+        delBtn.addEventListener("click", (e) => { e.stopPropagation(); deleteFile(entryPath, entry.name, false); });
+        row.appendChild(actions);
+
         row.addEventListener("click", () => openFile(entryPath, entry.name));
+
+        row.addEventListener("contextmenu", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          showContextMenu(e, entryPath, entry.name, false);
+        });
 
         wrapper.appendChild(row);
         parentEl.appendChild(wrapper);
@@ -847,10 +893,35 @@ async function openFile(path, name) {
   const nameEl = document.getElementById("file-viewer-name");
   const contentEl = document.getElementById("file-viewer-content");
 
+  currentOpenFilePath = path;
   nameEl.textContent = name;
   contentEl.textContent = "Loading...";
   contentEl.className = "";
   viewer.classList.remove("hidden");
+
+  // Wire download button
+  document.getElementById("file-viewer-download").onclick = () => downloadFile(path, name);
+
+  if (isImageFile(name)) {
+    try {
+      const url = cluster === "dsmlp"
+        ? `/api/dsmlp/image?path=${encodeURIComponent(path)}`
+        : `/api/image/${cluster}?path=${encodeURIComponent(path)}`;
+      const resp = await fetch(url);
+      const data = await resp.json();
+      if (data.error) {
+        contentEl.textContent = `Error: ${data.error}`;
+        contentEl.className = "plaintext";
+        return;
+      }
+      contentEl.className = "image-view";
+      contentEl.innerHTML = `<img src="data:${data.mime};base64,${data.data}" alt="${esc(name)}">`;
+    } catch (e) {
+      contentEl.textContent = `Error: ${e.message}`;
+      contentEl.className = "plaintext";
+    }
+    return;
+  }
 
   try {
     const url = cluster === "dsmlp"
@@ -892,6 +963,220 @@ function initFileExplorer() {
   document.getElementById("file-viewer-close").onclick = () => {
     document.getElementById("file-viewer").classList.add("hidden");
   };
+
+  document.getElementById("fe-new-file").onclick = () => createNewItem("", false);
+  document.getElementById("fe-new-folder").onclick = () => createNewItem("", true);
+}
+
+/* ── Resize handle ─────────────────────────────────────────────────────────── */
+
+function initResizeHandle() {
+  if (resizeHandleInitialized) return;
+  const handle = document.getElementById("resize-handle");
+  const fileExplorer = document.getElementById("file-explorer");
+  if (!handle || !fileExplorer) return;
+  resizeHandleInitialized = true;
+
+  let startX, startWidth;
+
+  handle.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    startX = e.clientX;
+    startWidth = fileExplorer.offsetWidth;
+    handle.classList.add("active");
+    document.body.classList.add("resizing");
+
+    const onMouseMove = (e) => {
+      // Explorer is on the right, so dragging left increases width
+      const delta = startX - e.clientX;
+      const newWidth = Math.min(600, Math.max(160, startWidth + delta));
+      fileExplorer.style.width = newWidth + "px";
+    };
+
+    const onMouseUp = () => {
+      handle.classList.remove("active");
+      document.body.classList.remove("resizing");
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      fitClaudeTerminal();
+    };
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  });
+}
+
+/* ── Context menu ──────────────────────────────────────────────────────────── */
+
+function hideContextMenu() {
+  const existing = document.querySelector(".context-menu");
+  if (existing) existing.remove();
+}
+
+function showContextMenu(e, path, name, isDir) {
+  hideContextMenu();
+
+  const menu = document.createElement("div");
+  menu.className = "context-menu";
+
+  const items = [];
+
+  if (!isDir) {
+    items.push({ label: "Open", icon: "📄", action: () => openFile(path, name) });
+    items.push({ label: "Download", icon: "⬇", action: () => downloadFile(path, name) });
+  }
+
+  items.push({ separator: true });
+  items.push({ label: "Rename", icon: "✏️", action: () => renameFile(path, name) });
+  items.push({ label: "Delete", icon: "🗑", action: () => deleteFile(path, name, isDir), danger: true });
+  items.push({ separator: true });
+
+  if (isDir) {
+    items.push({ label: "New File", icon: "📄", action: () => createNewItem(path, false) });
+    items.push({ label: "New Folder", icon: "📁", action: () => createNewItem(path, true) });
+  } else {
+    const parentPath = path.includes("/") ? path.substring(0, path.lastIndexOf("/")) : "";
+    items.push({ label: "New File", icon: "📄", action: () => createNewItem(parentPath, false) });
+    items.push({ label: "New Folder", icon: "📁", action: () => createNewItem(parentPath, true) });
+  }
+
+  for (const item of items) {
+    if (item.separator) {
+      const sep = document.createElement("div");
+      sep.className = "context-menu-separator";
+      menu.appendChild(sep);
+      continue;
+    }
+    const el = document.createElement("div");
+    el.className = "context-menu-item" + (item.danger ? " danger" : "");
+    el.innerHTML = `<span>${item.icon}</span>${item.label}`;
+    el.addEventListener("click", () => {
+      hideContextMenu();
+      item.action();
+    });
+    menu.appendChild(el);
+  }
+
+  document.body.appendChild(menu);
+
+  // Position clamped to viewport
+  const menuRect = menu.getBoundingClientRect();
+  let x = e.clientX;
+  let y = e.clientY;
+  if (x + menuRect.width > window.innerWidth) x = window.innerWidth - menuRect.width - 4;
+  if (y + menuRect.height > window.innerHeight) y = window.innerHeight - menuRect.height - 4;
+  menu.style.left = x + "px";
+  menu.style.top = y + "px";
+
+  // Close on click outside
+  setTimeout(() => {
+    document.addEventListener("click", hideContextMenu, { once: true });
+  }, 0);
+}
+
+/* ── File operations ───────────────────────────────────────────────────────── */
+
+function downloadFile(path, name) {
+  const cluster = getFileCluster();
+  if (!cluster) return;
+
+  const url = cluster === "dsmlp"
+    ? `/api/dsmlp/download?path=${encodeURIComponent(path)}`
+    : `/api/download/${cluster}?path=${encodeURIComponent(path)}`;
+
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+}
+
+async function renameFile(path, name) {
+  const cluster = getFileCluster();
+  if (!cluster) return;
+
+  const newName = prompt(`Rename "${name}" to:`, name);
+  if (!newName || newName === name) return;
+
+  const url = cluster === "dsmlp" ? "/api/dsmlp/rename" : `/api/rename/${cluster}`;
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ old_path: path, new_name: newName }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      alert(`Rename failed: ${data.error}`);
+      return;
+    }
+    refreshFileTree();
+  } catch (e) {
+    alert(`Rename failed: ${e.message}`);
+  }
+}
+
+async function deleteFile(path, name, isDir) {
+  const cluster = getFileCluster();
+  if (!cluster) return;
+
+  const type = isDir ? "folder" : "file";
+  if (!confirm(`Delete ${type} "${name}"? This cannot be undone.`)) return;
+
+  const url = cluster === "dsmlp" ? "/api/dsmlp/delete" : `/api/delete/${cluster}`;
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      alert(`Delete failed: ${data.error}`);
+      return;
+    }
+    // Close viewer if the deleted file was open
+    if (currentOpenFilePath === path) {
+      document.getElementById("file-viewer").classList.add("hidden");
+      currentOpenFilePath = null;
+    }
+    refreshFileTree();
+  } catch (e) {
+    alert(`Delete failed: ${e.message}`);
+  }
+}
+
+async function createNewItem(parentPath, isDir) {
+  const cluster = getFileCluster();
+  if (!cluster) return;
+
+  const type = isDir ? "folder" : "file";
+  const name = prompt(`New ${type} name:`);
+  if (!name) return;
+
+  const url = cluster === "dsmlp" ? "/api/dsmlp/create" : `/api/create/${cluster}`;
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: parentPath, name, is_dir: isDir }),
+    });
+    const data = await resp.json();
+    if (data.error) {
+      alert(`Create failed: ${data.error}`);
+      return;
+    }
+    refreshFileTree();
+  } catch (e) {
+    alert(`Create failed: ${e.message}`);
+  }
+}
+
+function refreshFileTree() {
+  const tree = document.getElementById("file-tree");
+  tree.innerHTML = `<div style="padding:12px;color:var(--text-dim);font-size:0.8rem">Loading...</div>`;
+  loadFileTree("", tree, 0);
 }
 
 /* ── Theme ─────────────────────────────────────────────────────────────────── */

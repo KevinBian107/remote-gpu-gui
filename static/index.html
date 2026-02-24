@@ -107,18 +107,26 @@
         </div>
         <div id="claude-body">
           <div id="claude-terminal-container"></div>
+          <div id="resize-handle"></div>
           <div id="file-explorer">
             <div id="file-explorer-header">
               <span id="file-explorer-path">/</span>
+              <span id="file-explorer-actions">
+                <button id="fe-new-file" title="New File">+</button>
+                <button id="fe-new-folder" title="New Folder">📁</button>
+              </span>
             </div>
             <div id="file-tree"></div>
-            <div id="file-viewer" class="hidden">
-              <div id="file-viewer-header">
-                <span id="file-viewer-name"></span>
+          </div>
+          <div id="file-viewer" class="hidden">
+            <div id="file-viewer-header">
+              <span id="file-viewer-name"></span>
+              <div id="file-viewer-actions">
+                <button id="file-viewer-download" title="Download">⬇</button>
                 <button id="file-viewer-close">✕</button>
               </div>
-              <div id="file-viewer-content"></div>
             </div>
+            <div id="file-viewer-content"></div>
           </div>
         </div>
       </section>

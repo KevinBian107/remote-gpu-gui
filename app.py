@@ -3,7 +3,7 @@ import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -378,7 +378,23 @@ def _safe_float(s: str) -> float:
 
 # ── File browser ─────────────────────────────────────────────────────────────
 
+import base64
 import posixpath
+
+
+class RenameRequest(BaseModel):
+    old_path: str
+    new_name: str
+
+
+class DeleteRequest(BaseModel):
+    path: str
+
+
+class CreateRequest(BaseModel):
+    path: str
+    name: str
+    is_dir: bool = False
 
 
 def _file_root(for_dsmlp=False) -> str:
@@ -463,6 +479,228 @@ async def dsmlp_read_file(path: str = ""):
         return JSONResponse(content={"error": "Not connected"}, status_code=503)
 
     return await _read_file_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), path)
+
+
+# ── Image viewing ────────────────────────────────────────────────────────────
+
+MIME_MAP = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".bmp": "image/bmp", ".webp": "image/webp",
+    ".svg": "image/svg+xml", ".ico": "image/x-icon",
+}
+
+
+async def _read_image_with_executor(execute, root, path):
+    full = posixpath.normpath(posixpath.join(root, path))
+    if not full.startswith(root):
+        return JSONResponse(content={"error": "Invalid path"}, status_code=400)
+
+    ext = posixpath.splitext(full)[1].lower()
+    mime = MIME_MAP.get(ext, "application/octet-stream")
+
+    try:
+        # Size check (try GNU stat, fall back to BSD stat)
+        size_result = await asyncio.to_thread(
+            execute, f"stat -c %s {full!r} 2>/dev/null || stat -f %z {full!r}"
+        )
+        size_str = size_result["stdout"].strip().splitlines()
+        if size_str:
+            size = int(size_str[0])
+            if size > 10 * 1024 * 1024:
+                return JSONResponse(content={"error": "File too large (>10MB)"}, status_code=400)
+
+        result = await asyncio.to_thread(execute, f"base64 {full!r}")
+        if result["exit_code"] != 0:
+            return JSONResponse(content={"error": result["stderr"].strip()}, status_code=400)
+
+        b64_data = result["stdout"].replace("\n", "").replace("\r", "")
+        return JSONResponse(content={"mime": mime, "data": b64_data})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/api/image/{cluster}")
+async def read_image(cluster: str, path: str = ""):
+    if cluster not in CLUSTERS:
+        return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
+    if not ssh.is_connected(cluster):
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
+    return await _read_image_with_executor(executor, _file_root(), path)
+
+
+@app.get("/api/dsmlp/image")
+async def dsmlp_read_image(path: str = ""):
+    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    return await _read_image_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), path)
+
+
+# ── File download ────────────────────────────────────────────────────────────
+
+
+async def _download_file_with_executor(execute, root, path):
+    full = posixpath.normpath(posixpath.join(root, path))
+    if not full.startswith(root):
+        return JSONResponse(content={"error": "Invalid path"}, status_code=400)
+
+    try:
+        result = await asyncio.to_thread(execute, f"base64 {full!r}")
+        if result["exit_code"] != 0:
+            return JSONResponse(content={"error": result["stderr"].strip()}, status_code=400)
+
+        b64_data = result["stdout"].replace("\n", "").replace("\r", "")
+        file_bytes = base64.b64decode(b64_data)
+        filename = posixpath.basename(full)
+        return Response(
+            content=file_bytes,
+            media_type="application/octet-stream",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.get("/api/download/{cluster}")
+async def download_file(cluster: str, path: str = ""):
+    if cluster not in CLUSTERS:
+        return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
+    if not ssh.is_connected(cluster):
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
+    return await _download_file_with_executor(executor, _file_root(), path)
+
+
+@app.get("/api/dsmlp/download")
+async def dsmlp_download_file(path: str = ""):
+    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    return await _download_file_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), path)
+
+
+# ── File rename ──────────────────────────────────────────────────────────────
+
+
+async def _rename_file_with_executor(execute, root, old_path, new_name):
+    full_old = posixpath.normpath(posixpath.join(root, old_path))
+    if not full_old.startswith(root):
+        return JSONResponse(content={"error": "Invalid path"}, status_code=400)
+
+    parent = posixpath.dirname(full_old)
+    full_new = posixpath.normpath(posixpath.join(parent, new_name))
+    if not full_new.startswith(root):
+        return JSONResponse(content={"error": "Invalid new name"}, status_code=400)
+
+    try:
+        result = await asyncio.to_thread(execute, f"mv {full_old!r} {full_new!r}")
+        if result["exit_code"] != 0:
+            return JSONResponse(content={"error": result["stderr"].strip()}, status_code=400)
+        return JSONResponse(content={"ok": True})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/api/rename/{cluster}")
+async def rename_file(cluster: str, req: RenameRequest):
+    if cluster not in CLUSTERS:
+        return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
+    if not ssh.is_connected(cluster):
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
+    return await _rename_file_with_executor(executor, _file_root(), req.old_path, req.new_name)
+
+
+@app.post("/api/dsmlp/rename")
+async def dsmlp_rename_file(req: RenameRequest):
+    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    return await _rename_file_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), req.old_path, req.new_name)
+
+
+# ── File delete ──────────────────────────────────────────────────────────────
+
+
+async def _delete_file_with_executor(execute, root, path):
+    full = posixpath.normpath(posixpath.join(root, path))
+    if not full.startswith(root):
+        return JSONResponse(content={"error": "Invalid path"}, status_code=400)
+    # Guard against deleting the root itself
+    if full == root:
+        return JSONResponse(content={"error": "Cannot delete project root"}, status_code=400)
+
+    try:
+        result = await asyncio.to_thread(execute, f"rm -rf {full!r}")
+        if result["exit_code"] != 0:
+            return JSONResponse(content={"error": result["stderr"].strip()}, status_code=400)
+        return JSONResponse(content={"ok": True})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/api/delete/{cluster}")
+async def delete_file(cluster: str, req: DeleteRequest):
+    if cluster not in CLUSTERS:
+        return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
+    if not ssh.is_connected(cluster):
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
+    return await _delete_file_with_executor(executor, _file_root(), req.path)
+
+
+@app.post("/api/dsmlp/delete")
+async def dsmlp_delete_file(req: DeleteRequest):
+    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    return await _delete_file_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), req.path)
+
+
+# ── File/folder create ───────────────────────────────────────────────────────
+
+
+async def _create_file_with_executor(execute, root, path, name, is_dir):
+    full_parent = posixpath.normpath(posixpath.join(root, path))
+    if not full_parent.startswith(root):
+        return JSONResponse(content={"error": "Invalid path"}, status_code=400)
+
+    full_new = posixpath.normpath(posixpath.join(full_parent, name))
+    if not full_new.startswith(root):
+        return JSONResponse(content={"error": "Invalid name"}, status_code=400)
+
+    cmd = f"mkdir -p {full_new!r}" if is_dir else f"touch {full_new!r}"
+    try:
+        result = await asyncio.to_thread(execute, cmd)
+        if result["exit_code"] != 0:
+            return JSONResponse(content={"error": result["stderr"].strip()}, status_code=400)
+        return JSONResponse(content={"ok": True})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/api/create/{cluster}")
+async def create_file(cluster: str, req: CreateRequest):
+    if cluster not in CLUSTERS:
+        return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
+    if not ssh.is_connected(cluster):
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
+    return await _create_file_with_executor(executor, _file_root(), req.path, req.name, req.is_dir)
+
+
+@app.post("/api/dsmlp/create")
+async def dsmlp_create_file(req: CreateRequest):
+    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+
+    return await _create_file_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), req.path, req.name, req.is_dir)
 
 
 # ── Static files (must be last) ──────────────────────────────────────────────

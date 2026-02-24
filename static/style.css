@@ -716,6 +716,7 @@ body {
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
+  position: relative;
 }
 
 #claude-terminal-container {
@@ -742,18 +743,61 @@ body {
 
 /* ── File explorer ────────────────────────────────────────────────────────── */
 
+/* ── Resize handle ────────────────────────────────────────────────────────── */
+
+#resize-handle {
+  width: 6px;
+  cursor: col-resize;
+  background: var(--border);
+  flex-shrink: 0;
+  transition: background var(--transition);
+  z-index: 5;
+  position: relative;
+}
+
+#resize-handle::after {
+  content: "⋮";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  color: var(--text-dim);
+  font-size: 10px;
+  pointer-events: none;
+}
+
+#resize-handle:hover,
+#resize-handle.active {
+  background: var(--accent);
+}
+
+#resize-handle:hover::after,
+#resize-handle.active::after {
+  color: #fff;
+}
+
+body.resizing {
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: col-resize;
+}
+
+body.resizing iframe,
+body.resizing .xterm {
+  pointer-events: none;
+}
+
 #file-explorer {
   width: 260px;
   flex-shrink: 0;
   background: var(--bg-elevated);
-  border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
 }
 
 #file-explorer-header {
-  padding: 10px 14px;
+  padding: 8px 14px;
   font-size: 0.7rem;
   font-weight: 600;
   text-transform: uppercase;
@@ -762,7 +806,38 @@ body {
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
   overflow: hidden;
-  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+#file-explorer-actions {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+#file-explorer-actions button {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: 3px;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.7rem;
+  transition: all var(--transition);
+  padding: 0;
+}
+
+#file-explorer-actions button:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+  border-color: var(--text-dim);
 }
 
 #file-tree {
@@ -785,9 +860,38 @@ body {
   user-select: none;
   transition: background var(--transition);
   font-size: 0.78rem;
+  position: relative;
 }
 
 .file-entry:hover { background: var(--bg-hover); }
+
+.file-entry .file-actions {
+  display: none;
+  margin-left: auto;
+  flex-shrink: 0;
+  gap: 2px;
+}
+
+.file-entry:hover .file-actions {
+  display: flex;
+}
+
+.file-action-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.7rem;
+  padding: 1px 4px;
+  border-radius: 3px;
+  line-height: 1;
+  transition: all var(--transition);
+}
+
+.file-action-btn:hover {
+  background: var(--bg-active);
+  color: var(--text);
+}
 
 .file-entry.dir { color: var(--accent); font-weight: 500; }
 .file-entry.md-file { color: var(--green); }
@@ -815,15 +919,15 @@ body {
   position: absolute;
   top: 0;
   right: 0;
+  bottom: 0;
   width: 55%;
-  min-width: 420px;
+  min-width: 400px;
   max-width: 740px;
-  height: 100%;
   background: var(--bg-elevated);
   border-left: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  z-index: 10;
+  z-index: 20;
   box-shadow: var(--shadow-lg);
 }
 
@@ -848,7 +952,14 @@ body {
   white-space: nowrap;
 }
 
-#file-viewer-close {
+#file-viewer-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+#file-viewer-close,
+#file-viewer-download {
   background: transparent;
   border: 1px solid var(--border);
   color: var(--text-dim);
@@ -863,7 +974,8 @@ body {
   transition: all var(--transition);
 }
 
-#file-viewer-close:hover {
+#file-viewer-close:hover,
+#file-viewer-download:hover {
   color: var(--text);
   background: var(--bg-hover);
   border-color: var(--text-dim);
@@ -944,4 +1056,61 @@ body {
   color: var(--text);
   font-size: 0.8rem;
   line-height: 1.5;
+}
+
+/* Image view */
+#file-viewer-content.image-view {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+#file-viewer-content.image-view img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: var(--radius);
+}
+
+/* ── Context menu ────────────────────────────────────────────────────────── */
+
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 160px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  padding: 4px 0;
+  font-size: 0.8rem;
+}
+
+.context-menu-item {
+  padding: 7px 14px;
+  cursor: pointer;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  transition: background var(--transition);
+}
+
+.context-menu-item:hover {
+  background: var(--bg-hover);
+}
+
+.context-menu-item.danger {
+  color: var(--red);
+}
+
+.context-menu-item.danger:hover {
+  background: var(--red-subtle);
+}
+
+.context-menu-separator {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 0;
 }
