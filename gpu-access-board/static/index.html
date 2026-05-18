@@ -4,32 +4,61 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>GPU Cluster Dashboard</title>
-  <link rel="stylesheet" href="/style.css">
+  <title>GPU Access Board · Salk</title>
+  <link rel="stylesheet" href="style.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 </head>
 <body>
   <!-- Login screen -->
   <div id="login-screen">
-    <button id="login-theme-toggle" class="login-theme-btn">🌙</button>
+    <div class="login-toolbar">
+      <button id="login-settings-btn" class="login-icon-btn" title="Backend settings">⚙</button>
+      <button id="login-theme-toggle" class="login-icon-btn" title="Toggle theme">🌙</button>
+    </div>
     <div class="login-box">
-      <span class="login-icon">🖥️</span>
-      <h1>GPU Cluster Dashboard</h1>
-      <p>Select a cluster and connect.</p>
-      <select id="login-mode">
-        <option value="runai">RunAI (Salk) — SSH password</option>
-        <option value="dsmlp">DSMLP (UCSD) — SSH key + Duo</option>
-        <option value="both">Both</option>
-      </select>
-      <div id="runai-fields">
-        <input type="password" id="password-input" placeholder="SSH password" autofocus>
+      <div class="login-glyph">
+        <svg viewBox="0 0 64 64" width="44" height="44" aria-hidden="true">
+          <defs>
+            <linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0%" stop-color="#7c8cff"/>
+              <stop offset="100%" stop-color="#a78bfa"/>
+            </linearGradient>
+          </defs>
+          <g transform="translate(32,32)" fill="none" stroke="url(#lg)" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="0" cy="0" rx="24" ry="8" stroke-width="2" transform="rotate(-20)"/>
+            <ellipse cx="0" cy="0" rx="19" ry="6.5" stroke-width="2" transform="rotate(20)"/>
+            <ellipse cx="0" cy="0" rx="12" ry="4" stroke-width="2"/>
+          </g>
+          <circle cx="32" cy="32" r="2.8" fill="#a78bfa"/>
+        </svg>
       </div>
-      <div id="dsmlp-fields" class="hidden">
-        <p class="dsmlp-note">Uses SSH key auth. A Duo push will be sent — approve on your phone. <a href="https://github.com/KevinBian107/DSC180-Toolbox" target="_blank">Setup guide</a></p>
-      </div>
+      <h1>GPU Access Board</h1>
+      <p class="login-sub">Salk RunAI cluster · SSH password auth</p>
+      <p class="login-hint">You must be on the Salk VPN for the backend to reach the cluster.</p>
+      <input type="password" id="password-input" placeholder="SSH password" autofocus autocomplete="off">
       <button id="login-btn">Connect</button>
       <div id="login-status"></div>
-      <button id="dsmlp-launch-btn" class="hidden">Launch Pod</button>
+      <div id="backend-info" class="backend-info"></div>
+    </div>
+  </div>
+
+  <!-- Settings dialog -->
+  <div id="settings-overlay" class="modal-overlay hidden">
+    <div class="modal">
+      <h3>Backend</h3>
+      <p class="modal-hint">
+        Where this page should send API and WebSocket calls. Defaults to the
+        page's origin when served by the backend, or
+        <code>http://localhost:8000</code> when opened from GitHub Pages.
+      </p>
+      <label>
+        Backend URL
+        <input type="text" id="settings-backend-url" placeholder="http://localhost:8000" autocomplete="off">
+      </label>
+      <div class="modal-actions">
+        <button id="settings-cancel" class="btn-secondary">Cancel</button>
+        <button id="settings-save" class="btn-primary">Save</button>
+      </div>
     </div>
   </div>
 
@@ -37,11 +66,15 @@
   <div id="dashboard" class="hidden">
     <!-- Sidebar -->
     <aside id="sidebar">
+      <div class="sidebar-header">
+        <span class="sidebar-glyph" aria-hidden="true">●</span>
+        <span class="sidebar-title">Salk</span>
+      </div>
       <h2>Clusters</h2>
       <ul id="cluster-list"></ul>
       <div class="sidebar-actions">
         <button id="logout-btn">Disconnect</button>
-        <button id="theme-toggle">🌙</button>
+        <button id="theme-toggle" title="Toggle theme">🌙</button>
       </div>
     </aside>
 
@@ -104,6 +137,7 @@
             <select id="claude-cluster-select"></select>
           </label>
           <button id="claude-connect-btn">Launch</button>
+          <span class="claude-screen-hint" id="claude-screen-hint"></span>
         </div>
         <div id="claude-body">
           <div id="claude-terminal-container"></div>
@@ -136,6 +170,6 @@
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.0/marked.min.js"></script>
-  <script src="/app.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>

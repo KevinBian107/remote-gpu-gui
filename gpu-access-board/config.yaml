@@ -2,15 +2,21 @@
 server:
   host: 0.0.0.0
   port: 8000
+  # Origins allowed to call this backend cross-origin (e.g. a static frontend
+  # hosted on GitHub Pages). Set to ["*"] to disable the allowlist.
+  cors_origins:
+    - http://localhost:8000
+    - http://127.0.0.1:8000
+    - https://kevinbian107.github.io
 
 # ── Project ───────────────────────────────────────────────────────────────────
 project:
   directory: /home/jovyan/vast/kaiwen/track-mjx
-  screen_session: train-vqvae      # auto-attach in Terminal tab (if running)
-  claude_screen_session: claude     # screen session name for Claude tab
-  claude_user: devuser              # su to this user before launching claude
+  screen_session: train-vqvae          # auto-attach in Terminal tab (if running)
+  claude_screen_session: claude-remote-access   # screen session name for Claude tab
+  claude_user: devuser                 # su to this user before launching claude
 
-# ── Clusters ──────────────────────────────────────────────────────────────────
+# ── Clusters (Salk RunAI) ─────────────────────────────────────────────────────
 clusters:
   topovnl-salk:
     host: 10.7.30.216
@@ -31,17 +37,3 @@ clusters:
     host: 10.7.30.112
     port: 31658
     username: root
-
-# ── DSMLP (UCSD) ────────────────────────────────────────────────────────────
-dsmlp:
-  host: dsmlp-login.ucsd.edu
-  port: 22
-  username: kbian
-  key_path: ~/.ssh/id_ed25519
-  launch_command: "launch-scipy-ml.sh -W DSC180A_FA25_A00 -g 4 -p low -c 8 -m 64 -n 31 -b"
-  project:
-    directory: private/MOSAIC
-    screen_session: train-vqvae
-    claude_screen_session: claude
-    claude_user: devuser
-  auth_guide: "https://github.com/KevinBian107/DSC180-Toolbox"

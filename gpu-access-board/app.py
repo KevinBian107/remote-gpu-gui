@@ -1,13 +1,16 @@
 import asyncio
+import base64
+import posixpath
 import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from config import CLUSTERS, PROJECT, DSMLP
+from config import CLUSTERS, PROJECT, SERVER
 from ssh_manager import SSHManager
 
 ssh = SSHManager()
@@ -20,6 +23,17 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+
+# CORS so a static frontend (e.g. GitHub Pages) can call this backend running
+# locally over the user's VPN.
+_cors_origins = SERVER.get("cors_origins", ["*"])
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ── REST endpoints ────────────────────────────────────────────────────────────
@@ -84,74 +98,6 @@ async def get_processes(cluster: str):
         return JSONResponse(content={"processes": processes})
     except Exception as e:
         return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-# ── DSMLP REST endpoints ─────────────────────────────────────────────────────
-
-
-@app.post("/api/dsmlp/login")
-async def dsmlp_login():
-    result = await asyncio.to_thread(ssh.connect_dsmlp)
-    if not result["ok"]:
-        return JSONResponse(content={"connected": False, "error": result["error"]}, status_code=500)
-    pod = await asyncio.to_thread(ssh._detect_dsmlp_pod)
-    return JSONResponse(content={"connected": True, "pod": pod})
-
-
-@app.post("/api/dsmlp/launch")
-async def dsmlp_launch():
-    if not ssh.is_dsmlp_connected():
-        return JSONResponse(content={"ok": False, "error": "Not connected to DSMLP"}, status_code=503)
-    result = await asyncio.to_thread(ssh.launch_dsmlp_pod)
-    if not result["ok"]:
-        return JSONResponse(content=result, status_code=500)
-    return JSONResponse(content=result)
-
-
-@app.get("/api/dsmlp/status")
-async def dsmlp_status():
-    connected = ssh.is_dsmlp_connected()
-    pod = ssh._dsmlp_pod if connected else None
-    return JSONResponse(content={"connected": connected, "pod": pod})
-
-
-@app.get("/api/dsmlp/metrics")
-async def dsmlp_metrics():
-    if not ssh.is_dsmlp_connected():
-        return JSONResponse(content={"error": "Not connected"}, status_code=503)
-    if not ssh._dsmlp_pod:
-        return JSONResponse(content={"error": "No running pod"}, status_code=503)
-
-    executor = lambda cmd, **kw: ssh.dsmlp_execute(cmd, **kw)
-    try:
-        gpu = await asyncio.to_thread(_fetch_gpu_metrics, executor)
-        system = await asyncio.to_thread(_fetch_system_metrics, executor)
-        return JSONResponse(content={"gpu": gpu, "system": system})
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@app.get("/api/dsmlp/processes")
-async def dsmlp_processes():
-    if not ssh.is_dsmlp_connected():
-        return JSONResponse(content={"error": "Not connected"}, status_code=503)
-    if not ssh._dsmlp_pod:
-        return JSONResponse(content={"error": "No running pod"}, status_code=503)
-
-    try:
-        result = await asyncio.to_thread(
-            ssh.dsmlp_execute,
-            "ps aux --sort=-%mem | head -50",
-        )
-        processes = _parse_ps_aux(result["stdout"])
-        return JSONResponse(content={"processes": processes})
-    except Exception as e:
-        return JSONResponse(content={"error": str(e)}, status_code=500)
-
-
-@app.get("/api/dsmlp/config")
-async def dsmlp_config():
-    return JSONResponse(content={"dsmlp": DSMLP})
 
 
 # ── WebSocket terminal ────────────────────────────────────────────────────────
@@ -221,23 +167,6 @@ async def terminal_ws(ws: WebSocket, cluster: str):
     await _ws_terminal_bridge(ws, channel)
 
 
-@app.websocket("/ws/dsmlp/terminal")
-async def dsmlp_terminal_ws(ws: WebSocket):
-    await ws.accept()
-
-    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
-        await ws.close(code=1008, reason="DSMLP not connected or no pod")
-        return
-
-    try:
-        channel = await asyncio.to_thread(ssh.get_dsmlp_interactive_channel)
-    except Exception as e:
-        await ws.close(code=1011, reason=str(e))
-        return
-
-    await _ws_terminal_bridge(ws, channel)
-
-
 def _channel_recv(channel) -> str | None:
     """Blocking read from paramiko channel (run in executor)."""
     import select
@@ -282,7 +211,6 @@ def _fetch_gpu_metrics(execute) -> list[dict]:
     proc_result = execute(
         "nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory,name --format=csv,noheader,nounits 2>/dev/null || true",
     )
-    # Also get GPU UUID mapping
     uuid_result = execute(
         "nvidia-smi --query-gpu=index,uuid --format=csv,noheader",
     )
@@ -313,20 +241,17 @@ def _fetch_gpu_metrics(execute) -> list[dict]:
 
 def _fetch_system_metrics(execute) -> dict:
     """Fetch system metrics. `execute` is a callable: execute(cmd, **kw) -> {stdout, stderr, exit_code}."""
-    # CPU usage (1-min load average / nproc)
     cpu_result = execute("nproc && cat /proc/loadavg")
     lines = cpu_result["stdout"].strip().splitlines()
     nproc = int(lines[0]) if lines else 1
     load_1m = float(lines[1].split()[0]) if len(lines) > 1 else 0.0
     cpu_percent = min(round(load_1m / nproc * 100, 1), 100.0)
 
-    # Memory
     mem_result = execute("free -m | grep Mem:")
     mem_parts = mem_result["stdout"].split()
     mem_total = int(mem_parts[1]) if len(mem_parts) > 1 else 0
     mem_used = int(mem_parts[2]) if len(mem_parts) > 2 else 0
 
-    # Disk
     disk_result = execute("df -h / | tail -1")
     disk_parts = disk_result["stdout"].split()
     disk_total = disk_parts[1] if len(disk_parts) > 1 else "?"
@@ -378,9 +303,6 @@ def _safe_float(s: str) -> float:
 
 # ── File browser ─────────────────────────────────────────────────────────────
 
-import base64
-import posixpath
-
 
 class RenameRequest(BaseModel):
     old_path: str
@@ -397,10 +319,7 @@ class CreateRequest(BaseModel):
     is_dir: bool = False
 
 
-def _file_root(for_dsmlp=False) -> str:
-    if for_dsmlp:
-        proj = DSMLP.get("project", {})
-        return proj.get("directory", ".")
+def _file_root() -> str:
     return PROJECT.get("directory", ".")
 
 
@@ -465,22 +384,6 @@ async def read_file(cluster: str, path: str = ""):
     return await _read_file_with_executor(executor, _file_root(), path)
 
 
-@app.get("/api/dsmlp/files")
-async def dsmlp_list_files(path: str = ""):
-    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
-        return JSONResponse(content={"error": "Not connected"}, status_code=503)
-
-    return await _list_files_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), path)
-
-
-@app.get("/api/dsmlp/file")
-async def dsmlp_read_file(path: str = ""):
-    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
-        return JSONResponse(content={"error": "Not connected"}, status_code=503)
-
-    return await _read_file_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), path)
-
-
 # ── Image viewing ────────────────────────────────────────────────────────────
 
 MIME_MAP = {
@@ -499,7 +402,6 @@ async def _read_image_with_executor(execute, root, path):
     mime = MIME_MAP.get(ext, "application/octet-stream")
 
     try:
-        # Size check (try GNU stat, fall back to BSD stat)
         size_result = await asyncio.to_thread(
             execute, f"stat -c %s {full!r} 2>/dev/null || stat -f %z {full!r}"
         )
@@ -528,14 +430,6 @@ async def read_image(cluster: str, path: str = ""):
 
     executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
     return await _read_image_with_executor(executor, _file_root(), path)
-
-
-@app.get("/api/dsmlp/image")
-async def dsmlp_read_image(path: str = ""):
-    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
-        return JSONResponse(content={"error": "Not connected"}, status_code=503)
-
-    return await _read_image_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), path)
 
 
 # ── File download ────────────────────────────────────────────────────────────
@@ -572,14 +466,6 @@ async def download_file(cluster: str, path: str = ""):
 
     executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
     return await _download_file_with_executor(executor, _file_root(), path)
-
-
-@app.get("/api/dsmlp/download")
-async def dsmlp_download_file(path: str = ""):
-    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
-        return JSONResponse(content={"error": "Not connected"}, status_code=503)
-
-    return await _download_file_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), path)
 
 
 # ── Folder download ─────────────────────────────────────────────────────
@@ -622,14 +508,6 @@ async def download_folder(cluster: str, path: str = ""):
     return await _download_folder_with_executor(executor, _file_root(), path)
 
 
-@app.get("/api/dsmlp/download-folder")
-async def dsmlp_download_folder(path: str = ""):
-    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
-        return JSONResponse(content={"error": "Not connected"}, status_code=503)
-
-    return await _download_folder_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), path)
-
-
 # ── File rename ──────────────────────────────────────────────────────────────
 
 
@@ -663,14 +541,6 @@ async def rename_file(cluster: str, req: RenameRequest):
     return await _rename_file_with_executor(executor, _file_root(), req.old_path, req.new_name)
 
 
-@app.post("/api/dsmlp/rename")
-async def dsmlp_rename_file(req: RenameRequest):
-    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
-        return JSONResponse(content={"error": "Not connected"}, status_code=503)
-
-    return await _rename_file_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), req.old_path, req.new_name)
-
-
 # ── File delete ──────────────────────────────────────────────────────────────
 
 
@@ -678,7 +548,6 @@ async def _delete_file_with_executor(execute, root, path):
     full = posixpath.normpath(posixpath.join(root, path))
     if not full.startswith(root):
         return JSONResponse(content={"error": "Invalid path"}, status_code=400)
-    # Guard against deleting the root itself
     if full == root:
         return JSONResponse(content={"error": "Cannot delete project root"}, status_code=400)
 
@@ -700,14 +569,6 @@ async def delete_file(cluster: str, req: DeleteRequest):
 
     executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
     return await _delete_file_with_executor(executor, _file_root(), req.path)
-
-
-@app.post("/api/dsmlp/delete")
-async def dsmlp_delete_file(req: DeleteRequest):
-    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
-        return JSONResponse(content={"error": "Not connected"}, status_code=503)
-
-    return await _delete_file_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), req.path)
 
 
 # ── File/folder create ───────────────────────────────────────────────────────
@@ -741,14 +602,6 @@ async def create_file(cluster: str, req: CreateRequest):
 
     executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
     return await _create_file_with_executor(executor, _file_root(), req.path, req.name, req.is_dir)
-
-
-@app.post("/api/dsmlp/create")
-async def dsmlp_create_file(req: CreateRequest):
-    if not ssh.is_dsmlp_connected() or not ssh._dsmlp_pod:
-        return JSONResponse(content={"error": "Not connected"}, status_code=503)
-
-    return await _create_file_with_executor(ssh.dsmlp_execute, _file_root(for_dsmlp=True), req.path, req.name, req.is_dir)
 
 
 # ── Static files (must be last) ──────────────────────────────────────────────
