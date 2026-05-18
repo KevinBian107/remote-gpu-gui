@@ -1,7 +1,0 @@
-{
-  "gist_id": "REPLACE_ME_WITH_GIST_ID",
-  "github_token": "REPLACE_ME_WITH_GITHUB_PAT",
-  "workstation_name": "${hostname}",
-  "interval_seconds": 30,
-  "gist_file": "metrics.json"
-}
