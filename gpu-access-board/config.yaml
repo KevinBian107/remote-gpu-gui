@@ -21,6 +21,7 @@ clusters:
     host: 10.7.30.216
     port: 30988
     username: root
+    directory: /home/jovyan/vast/kaiwen/TopoVNL
 
   vqmimic-salk-1:
     host: 10.7.30.114

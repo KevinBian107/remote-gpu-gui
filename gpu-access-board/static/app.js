@@ -384,7 +384,10 @@ function buildSubtabs(containerId, getActive, onSelect) {
 }
 
 function refreshFileTreeIfOpen() {
-  // Only reload if any Claude session has been launched (file tree initialized).
+  // Re-label the explorer header to the active cluster's dir, regardless of
+  // whether a session has been launched yet.
+  updateFileExplorerLabel();
+  // Reload the tree only if it's been populated (i.e. a session is/was open).
   const tree = document.getElementById("file-tree");
   if (tree && tree.children.length > 0 && Object.keys(claudeTerminals).length > 0) {
     refreshFileTree();
@@ -754,7 +757,7 @@ function launchClaude() {
 
   const ws = new WebSocket(wsUrl(`/ws/terminal/${cluster}`));
 
-  const projDir = projectConfig.directory || "~";
+  const projDir = clusterDir(cluster);
   const claudeUser = projectConfig.claude_user || "devuser";
   const claudeScreen = projectConfig.claude_screen_session || "claude-remote-access";
 
@@ -961,12 +964,25 @@ async function openFile(path, name) {
   }
 }
 
+function clusterDir(cluster) {
+  return (clusters[cluster] && clusters[cluster].directory)
+    || projectConfig.directory
+    || "~";
+}
+
+function updateFileExplorerLabel() {
+  const cluster = activeClaudeCluster;
+  const labelEl = document.getElementById("file-explorer-path");
+  if (!cluster || !labelEl) return;
+  const dir = clusterDir(cluster);
+  labelEl.textContent = dir.split("/").filter(Boolean).pop() || dir;
+}
+
 function initFileExplorer() {
   const cluster = getFileCluster();
   if (!cluster) return;
 
-  const dir = projectConfig.directory || "~";
-  document.getElementById("file-explorer-path").textContent = dir.split("/").filter(Boolean).pop() || dir;
+  updateFileExplorerLabel();
   const tree = document.getElementById("file-tree");
   tree.innerHTML = `<div style="padding:12px;color:var(--text-dim);font-size:0.8rem">Loading...</div>`;
   loadFileTree("", tree, 0);

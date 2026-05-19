@@ -58,10 +58,18 @@ def _known_cluster(name: str) -> bool:
 @app.post("/api/login")
 async def login(req: LoginRequest):
     # Use posted clusters if provided; otherwise fall back to config.yaml bootstrap.
-    clusters = (
-        {k: v.model_dump() for k, v in req.clusters.items()}
-        if req.clusters is not None else CLUSTERS
-    )
+    if req.clusters is not None:
+        clusters = {k: v.model_dump() for k, v in req.clusters.items()}
+        # If the posted cluster has no `directory`, inherit from config.yaml's
+        # per-cluster entry. Keeps server-side per-cluster dirs (e.g.
+        # topovnl-salk → /home/jovyan/vast/kaiwen/TopoVNL) effective even when
+        # the user has stale cluster defs in localStorage.
+        for name, cfg in clusters.items():
+            yaml_cfg = CLUSTERS.get(name) or {}
+            if not cfg.get("directory") and yaml_cfg.get("directory"):
+                cfg["directory"] = yaml_cfg["directory"]
+    else:
+        clusters = CLUSTERS
     ssh.configure(clusters)
     results = await asyncio.to_thread(ssh.connect_all, req.password)
     return JSONResponse(content=results)
@@ -80,11 +88,13 @@ async def get_defaults():
 
 @app.get("/api/clusters")
 async def list_clusters():
+    default_dir = PROJECT.get("directory", "")
     statuses = {}
     for name in ssh.cluster_names():
         cfg = ssh.cluster_config(name) or {}
         statuses[name] = {
             "host": cfg.get("host", ""),
+            "directory": cfg.get("directory") or default_dir,
             "connected": ssh.is_connected(name),
         }
     return JSONResponse(content=statuses)
