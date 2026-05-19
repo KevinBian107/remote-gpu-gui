@@ -748,6 +748,9 @@ function launchClaude() {
     fontSize: 14,
     fontFamily: "'SF Mono', Menlo, Monaco, 'Courier New', monospace",
     theme: currentTermTheme(),
+    scrollback: 10000,         // 10k lines of history in the main buffer
+    scrollSensitivity: 3,
+    fastScrollSensitivity: 8,
   });
 
   const fitAddon = new FitAddon.FitAddon();
@@ -772,7 +775,21 @@ function launchClaude() {
         setTimeout(() => {
           ws.send(`cd ${projDir}\n`);
           setTimeout(() => {
-            ws.send(`screen -ls 2>/dev/null | grep -q '\\.${claudeScreen}\\b' && screen -d -r ${claudeScreen} || screen -S ${claudeScreen} bash -c 'claude --dangerously-skip-permissions; exec bash'\n`);
+            // Write a small custom screenrc that:
+            //   - sources the user's normal ~/.screenrc if present
+            //   - disables alt-buffer switching (so xterm.js mouse-wheel scroll
+            //     shows real history instead of stale terminal garbage)
+            //   - bumps screen's own scrollback to 100k lines
+            // Idempotent: just overwritten each launch.
+            ws.send(
+              "mkdir -p ~/.config/gpu-access-board && " +
+              "{ echo 'source $HOME/.screenrc 2>/dev/null'; " +
+                "echo 'termcapinfo xterm* ti@:te@'; " +
+                "echo 'defscrollback 100000'; } > ~/.config/gpu-access-board/screenrc\n"
+            );
+            setTimeout(() => {
+              ws.send(`screen -c ~/.config/gpu-access-board/screenrc -ls 2>/dev/null | grep -q '\\.${claudeScreen}\\b' && screen -c ~/.config/gpu-access-board/screenrc -d -r ${claudeScreen} || screen -c ~/.config/gpu-access-board/screenrc -S ${claudeScreen} bash -c 'claude --dangerously-skip-permissions; exec bash'\n`);
+            }, 200);
           }, 300);
         }, 300);
       }, 300);
