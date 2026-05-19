@@ -693,6 +693,38 @@ body {
   border-radius: var(--radius);
 }
 
+/* ── Cluster sub-tabs (Processes + Claude) ───────────────────────────────── */
+.subtabs {
+  display: inline-flex;
+  gap: 2px;
+  padding: 3px;
+  background: var(--bg-active);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.subtab {
+  padding: 5px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 500;
+  font-family: inherit;
+  border-radius: 5px;
+  white-space: nowrap;
+  transition: all var(--transition);
+}
+
+.subtab:hover { color: var(--text); }
+
+.subtab.active {
+  background: var(--grad-accent);
+  color: #fff;
+  box-shadow: 0 2px 8px var(--accent-glow);
+}
+
 /* ── Overview cards ───────────────────────────────────────────────────────── */
 
 #overview-cards {

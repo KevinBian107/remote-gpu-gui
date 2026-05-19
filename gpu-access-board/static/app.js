@@ -57,12 +57,16 @@ function wsUrl(path) {
 
 /* ── State ─────────────────────────────────────────────────────────────────── */
 
-let clusters = {};          // {name: {host, connected}} — runtime state from backend
-let clustersConfig = null;  // {name: {host, port, username, directory}} — user-editable
-let defaultsCache = null;   // {clusters, project} from /api/defaults
-let metricsCache = {};      // {name: {gpu: [...], system: {...}}}
+let clusters = {};            // {name: {host, connected}} — runtime state from backend
+let clustersConfig = null;    // {name: {host, port, username, directory}} — user-editable
+let defaultsCache = null;     // {clusters, project} from /api/defaults
+let metricsCache = {};        // {name: {gpu: [...], system: {...}}}
 let pollInterval = null;
-let claudeTerminal = null;  // {term, ws, fitAddon, cluster}
+// One Claude session per cluster, kept alive across subtab switches.
+// {clusterName: {term, ws, fitAddon, container}}
+let claudeTerminals = {};
+let activeProcCluster = null;
+let activeClaudeCluster = null;
 let projectConfig = {};     // from /api/config
 
 const IMAGE_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico"]);
@@ -104,9 +108,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("login-theme-toggle").addEventListener("click", toggleTheme);
   loadTheme();
 
-  document.getElementById("proc-cluster-select").addEventListener("change", fetchProcesses);
   document.getElementById("claude-connect-btn").addEventListener("click", launchClaude);
-  document.getElementById("claude-cluster-select").addEventListener("change", updateClaudeScreenHint);
 
   // Settings dialog
   document.getElementById("login-settings-btn").addEventListener("click", openSettings);
@@ -114,9 +116,6 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("settings-save").addEventListener("click", saveSettings);
   document.getElementById("add-cluster-btn").addEventListener("click", () => addClusterRow());
   document.getElementById("reset-clusters-btn").addEventListener("click", resetClustersToDefaults);
-
-  // Claude HUD installer
-  document.getElementById("claude-hud-btn").addEventListener("click", installClaudeHUD);
 
   // Load defaults so the Settings UI has something to show on first open.
   // Don't block boot on it — runs in background.
@@ -240,25 +239,6 @@ function escAttr(s) {
   return String(s == null ? "" : s).replace(/"/g, "&quot;");
 }
 
-// ── Claude HUD installer ────────────────────────────────────────────────────
-
-// Sends the two slash commands that install claude-hud:
-//   /plugin marketplace add jarrodwatts/claude-hud
-//   /plugin install claude-hud@claude-hud-marketplace
-// After install, claude-hud renders a live statusline at the bottom of every
-// Claude Code session (context %, token usage, model, branch, active tools).
-function installClaudeHUD() {
-  if (claudeTerminal?.ws?.readyState !== WebSocket.OPEN) {
-    alert("Launch a Claude session first.");
-    return;
-  }
-  const ws = claudeTerminal.ws;
-  ws.send("/plugin marketplace add jarrodwatts/claude-hud\n");
-  setTimeout(() => {
-    ws.send("/plugin install claude-hud@claude-hud-marketplace\n");
-  }, 1500);
-}
-
 /* ── Login / Logout ───────────────────────────────────────────────────────── */
 
 let runaiConnected = false;
@@ -320,11 +300,11 @@ async function doLogin() {
 }
 
 function doLogout() {
-  if (claudeTerminal) {
-    if (claudeTerminal.ws) claudeTerminal.ws.close();
-    if (claudeTerminal.term) claudeTerminal.term.dispose();
-    claudeTerminal = null;
+  for (const t of Object.values(claudeTerminals)) {
+    try { t.ws?.close(); } catch (e) {}
+    try { t.term?.dispose(); } catch (e) {}
   }
+  claudeTerminals = {};
   document.getElementById("claude-terminal-container").innerHTML = "";
 
   if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
@@ -362,8 +342,21 @@ async function enterDashboard() {
     list.appendChild(li);
   }
 
-  populateSelect("proc-cluster-select");
-  populateSelect("claude-cluster-select");
+  const firstConnected = Object.keys(clusters).find(n => clusters[n].connected) || null;
+  activeProcCluster = firstConnected;
+  activeClaudeCluster = firstConnected;
+  buildSubtabs("proc-cluster-subtabs", () => activeProcCluster, (name) => {
+    activeProcCluster = name;
+    fetchProcesses();
+  });
+  buildSubtabs("claude-cluster-subtabs", () => activeClaudeCluster, (name) => {
+    activeClaudeCluster = name;
+    showClaudeTerminalFor(name);
+    updateClaudeScreenHint();
+    refreshFileTreeIfOpen();
+    // Close the file viewer — its path likely doesn't apply to the new cluster.
+    document.getElementById("file-viewer")?.classList.add("hidden");
+  });
   updateClaudeScreenHint();
 
   await fetchAllMetrics();
@@ -371,16 +364,43 @@ async function enterDashboard() {
   pollInterval = setInterval(fetchAllMetrics, 5000);
 }
 
-function populateSelect(id) {
-  const sel = document.getElementById(id);
-  sel.innerHTML = "";
-  for (const name of Object.keys(clusters)) {
-    if (clusters[name].connected) {
-      const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
-      sel.appendChild(opt);
-    }
+function buildSubtabs(containerId, getActive, onSelect) {
+  const el = document.getElementById(containerId);
+  if (!el) return;
+  el.innerHTML = "";
+  const connected = Object.keys(clusters).filter(n => clusters[n].connected);
+  for (const name of connected) {
+    const btn = document.createElement("button");
+    btn.className = "subtab" + (name === getActive() ? " active" : "");
+    btn.textContent = name;
+    btn.dataset.cluster = name;
+    btn.addEventListener("click", () => {
+      // visual update
+      el.querySelectorAll(".subtab").forEach(b => b.classList.toggle("active", b.dataset.cluster === name));
+      onSelect(name);
+    });
+    el.appendChild(btn);
+  }
+}
+
+function refreshFileTreeIfOpen() {
+  // Only reload if any Claude session has been launched (file tree initialized).
+  const tree = document.getElementById("file-tree");
+  if (tree && tree.children.length > 0 && Object.keys(claudeTerminals).length > 0) {
+    refreshFileTree();
+  }
+}
+
+function showClaudeTerminalFor(cluster) {
+  const container = document.getElementById("claude-terminal-container");
+  if (!container) return;
+  for (const child of container.children) {
+    child.style.display = child.dataset.cluster === cluster ? "" : "none";
+  }
+  // Refit the now-visible terminal so xterm reflows to its container size.
+  const t = claudeTerminals[cluster];
+  if (t?.fitAddon) {
+    setTimeout(() => { try { t.fitAddon.fit(); } catch (e) {} }, 50);
   }
 }
 
@@ -630,7 +650,7 @@ let processSortKey = "mem";
 let processSortAsc = false;
 
 async function fetchProcesses() {
-  const cluster = document.getElementById("proc-cluster-select").value;
+  const cluster = activeProcCluster;
   if (!cluster) return;
   try {
     const resp = await fetch(apiUrl(`/api/processes/${cluster}`));
@@ -698,17 +718,27 @@ window.addEventListener("resize", () => {
 /* ── Claude terminal ──────────────────────────────────────────────────────── */
 
 function launchClaude() {
-  const cluster = document.getElementById("claude-cluster-select").value;
+  const cluster = activeClaudeCluster;
   if (!cluster) return;
 
-  if (claudeTerminal) {
-    if (claudeTerminal.ws) claudeTerminal.ws.close();
-    if (claudeTerminal.term) claudeTerminal.term.dispose();
-    claudeTerminal = null;
+  // If a session already exists for this cluster, just bring it to the front.
+  if (claudeTerminals[cluster]) {
+    showClaudeTerminalFor(cluster);
+    initFileExplorer();
+    initResizeHandle();
+    return;
   }
 
+  // Create a per-cluster terminal div, stacked inside the container.
   const container = document.getElementById("claude-terminal-container");
-  container.innerHTML = "";
+  const termDiv = document.createElement("div");
+  termDiv.className = "claude-term-instance";
+  termDiv.dataset.cluster = cluster;
+  termDiv.style.width = "100%";
+  termDiv.style.height = "100%";
+  // Hide every existing sibling so only this one is visible.
+  for (const child of container.children) child.style.display = "none";
+  container.appendChild(termDiv);
 
   const term = new Terminal({
     cursorBlink: true,
@@ -719,7 +749,7 @@ function launchClaude() {
 
   const fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
-  term.open(container);
+  term.open(termDiv);
   fitAddon.fit();
 
   const ws = new WebSocket(wsUrl(`/ws/terminal/${cluster}`));
@@ -758,23 +788,24 @@ function launchClaude() {
     if (ws.readyState === WebSocket.OPEN) ws.send(`\x01RESIZE:${cols},${rows}`);
   });
 
-  claudeTerminal = { term, ws, fitAddon, cluster };
+  claudeTerminals[cluster] = { term, ws, fitAddon, container: termDiv };
 
   initFileExplorer();
   initResizeHandle();
 }
 
 function fitClaudeTerminal() {
-  if (!claudeTerminal?.fitAddon) return;
+  const t = claudeTerminals[activeClaudeCluster];
+  if (!t?.fitAddon) return;
   setTimeout(() => {
-    try { claudeTerminal.fitAddon.fit(); } catch (e) {}
+    try { t.fitAddon.fit(); } catch (e) {}
   }, 50);
 }
 
 /* ── File explorer ─────────────────────────────────────────────────────────── */
 
 function getFileCluster() {
-  return document.getElementById("claude-cluster-select").value;
+  return activeClaudeCluster;
 }
 
 async function loadFileTree(path, parentEl, depth) {
@@ -1187,8 +1218,8 @@ function applyTheme(theme) {
   document.getElementById("login-theme-toggle").textContent = emoji;
 
   const termTheme = TERM_THEMES[theme];
-  if (claudeTerminal?.term) {
-    claudeTerminal.term.options.theme = termTheme;
+  for (const t of Object.values(claudeTerminals)) {
+    if (t.term) t.term.options.theme = termTheme;
   }
 }
 
