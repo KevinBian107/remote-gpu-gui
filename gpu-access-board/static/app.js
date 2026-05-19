@@ -115,8 +115,8 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("add-cluster-btn").addEventListener("click", () => addClusterRow());
   document.getElementById("reset-clusters-btn").addEventListener("click", resetClustersToDefaults);
 
-  // Claude /cost button
-  document.getElementById("claude-cost-btn").addEventListener("click", sendClaudeCost);
+  // Claude HUD installer
+  document.getElementById("claude-hud-btn").addEventListener("click", installClaudeHUD);
 
   // Load defaults so the Settings UI has something to show on first open.
   // Don't block boot on it — runs in background.
@@ -174,22 +174,33 @@ function saveSettings() {
 // ── Cluster config + defaults ───────────────────────────────────────────────
 
 async function loadDefaults() {
-  if (defaultsCache) return defaultsCache;
-  try {
-    const resp = await fetch(apiUrl("/api/defaults"));
-    if (resp.ok) defaultsCache = await resp.json();
-  } catch (e) {
-    defaultsCache = { clusters: {}, project: {} };
+  // Only cache *successful* fetches so a transient backend-down doesn't
+  // poison the cache and leave the Settings UI permanently empty.
+  if (!defaultsCache || !defaultsCache.clusters || Object.keys(defaultsCache.clusters).length === 0) {
+    try {
+      const resp = await fetch(apiUrl("/api/defaults"));
+      if (resp.ok) defaultsCache = await resp.json();
+    } catch (e) { /* leave defaultsCache null; we'll try again next call */ }
   }
-  // If no user-saved clusters yet, seed from defaults so first-time UX works.
+
+  // Load user-saved clusters (skip if it's empty / malformed).
   const stored = localStorage.getItem(LS_CLUSTERS);
   if (stored) {
-    try { clustersConfig = JSON.parse(stored); } catch (e) { clustersConfig = null; }
+    try {
+      const parsed = JSON.parse(stored);
+      if (parsed && typeof parsed === "object" && Object.keys(parsed).length > 0) {
+        clustersConfig = parsed;
+      }
+    } catch (e) { /* ignore */ }
   }
-  if (!clustersConfig && defaultsCache?.clusters) {
-    clustersConfig = JSON.parse(JSON.stringify(defaultsCache.clusters));
+
+  // If we still have no user config, seed from backend defaults (config.yaml).
+  if (!clustersConfig || Object.keys(clustersConfig).length === 0) {
+    if (defaultsCache?.clusters) {
+      clustersConfig = JSON.parse(JSON.stringify(defaultsCache.clusters));
+    }
   }
-  return defaultsCache;
+  return defaultsCache || { clusters: {}, project: {} };
 }
 
 function resetClustersToDefaults() {
@@ -229,12 +240,23 @@ function escAttr(s) {
   return String(s == null ? "" : s).replace(/"/g, "&quot;");
 }
 
-// ── Claude /cost button ─────────────────────────────────────────────────────
+// ── Claude HUD installer ────────────────────────────────────────────────────
 
-function sendClaudeCost() {
-  if (claudeTerminal?.ws?.readyState === WebSocket.OPEN) {
-    claudeTerminal.ws.send("/cost\n");
+// Sends the two slash commands that install claude-hud:
+//   /plugin marketplace add jarrodwatts/claude-hud
+//   /plugin install claude-hud@claude-hud-marketplace
+// After install, claude-hud renders a live statusline at the bottom of every
+// Claude Code session (context %, token usage, model, branch, active tools).
+function installClaudeHUD() {
+  if (claudeTerminal?.ws?.readyState !== WebSocket.OPEN) {
+    alert("Launch a Claude session first.");
+    return;
   }
+  const ws = claudeTerminal.ws;
+  ws.send("/plugin marketplace add jarrodwatts/claude-hud\n");
+  setTimeout(() => {
+    ws.send("/plugin install claude-hud@claude-hud-marketplace\n");
+  }, 1500);
 }
 
 /* ── Login / Logout ───────────────────────────────────────────────────────── */
