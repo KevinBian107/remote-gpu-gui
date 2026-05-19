@@ -39,12 +39,30 @@ app.add_middleware(
 # ── REST endpoints ────────────────────────────────────────────────────────────
 
 
+class ClusterDef(BaseModel):
+    host: str
+    port: int = 22
+    username: str
+    directory: str | None = None
+
+
 class LoginRequest(BaseModel):
     password: str
+    clusters: dict[str, ClusterDef] | None = None
+
+
+def _known_cluster(name: str) -> bool:
+    return ssh.cluster_config(name) is not None
 
 
 @app.post("/api/login")
 async def login(req: LoginRequest):
+    # Use posted clusters if provided; otherwise fall back to config.yaml bootstrap.
+    clusters = (
+        {k: v.model_dump() for k, v in req.clusters.items()}
+        if req.clusters is not None else CLUSTERS
+    )
+    ssh.configure(clusters)
     results = await asyncio.to_thread(ssh.connect_all, req.password)
     return JSONResponse(content=results)
 
@@ -54,12 +72,19 @@ async def get_config():
     return JSONResponse(content={"project": PROJECT})
 
 
+@app.get("/api/defaults")
+async def get_defaults():
+    """Bootstrap defaults from config.yaml, surfaced to the Settings UI."""
+    return JSONResponse(content={"clusters": CLUSTERS, "project": PROJECT})
+
+
 @app.get("/api/clusters")
 async def list_clusters():
     statuses = {}
-    for name in CLUSTERS:
+    for name in ssh.cluster_names():
+        cfg = ssh.cluster_config(name) or {}
         statuses[name] = {
-            "host": CLUSTERS[name]["host"],
+            "host": cfg.get("host", ""),
             "connected": ssh.is_connected(name),
         }
     return JSONResponse(content=statuses)
@@ -67,7 +92,7 @@ async def list_clusters():
 
 @app.get("/api/metrics/{cluster}")
 async def get_metrics(cluster: str):
-    if cluster not in CLUSTERS:
+    if not _known_cluster(cluster):
         return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
     if not ssh.is_connected(cluster):
         return JSONResponse(content={"error": "Not connected"}, status_code=503)
@@ -83,7 +108,7 @@ async def get_metrics(cluster: str):
 
 @app.get("/api/processes/{cluster}")
 async def get_processes(cluster: str):
-    if cluster not in CLUSTERS:
+    if not _known_cluster(cluster):
         return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
     if not ssh.is_connected(cluster):
         return JSONResponse(content={"error": "Not connected"}, status_code=503)
@@ -154,7 +179,7 @@ async def _ws_terminal_bridge(ws: WebSocket, channel):
 async def terminal_ws(ws: WebSocket, cluster: str):
     await ws.accept()
 
-    if cluster not in CLUSTERS or not ssh.is_connected(cluster):
+    if not _known_cluster(cluster) or not ssh.is_connected(cluster):
         await ws.close(code=1008, reason="Not connected")
         return
 
@@ -186,55 +211,125 @@ def _channel_recv(channel) -> str | None:
 
 
 def _fetch_gpu_metrics(execute) -> list[dict]:
-    """Fetch GPU metrics. `execute` is a callable: execute(cmd, **kw) -> {stdout, stderr, exit_code}."""
-    query = (
-        "nvidia-smi --query-gpu="
-        "index,name,utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw"
-        " --format=csv,noheader,nounits"
-    )
-    result = execute(query)
+    """Fetch GPU metrics. `execute` is a callable: execute(cmd, **kw) -> {stdout, stderr, exit_code}.
+
+    Queries in two passes — core (always supported) + extended (best-effort, e.g. clock
+    speeds, PCIe, p-state). If the extended query fails on this driver/GPU, we
+    fall back to just the core fields rather than blanking the whole response.
+    """
+    core_fields = [
+        "index", "name", "uuid",
+        "utilization.gpu", "utilization.memory",
+        "memory.used", "memory.total", "memory.free",
+        "temperature.gpu",
+        "power.draw", "power.limit",
+    ]
+    extended_fields = [
+        "fan.speed",
+        "pstate",
+        "clocks.current.graphics", "clocks.max.graphics",
+        "clocks.current.memory", "clocks.max.memory",
+        "pcie.link.gen.current", "pcie.link.gen.max",
+        "pcie.link.width.current", "pcie.link.width.max",
+        "driver_version",
+        "compute_mode",
+        "persistence_mode",
+    ]
+
+    def _query(fields):
+        q = f"nvidia-smi --query-gpu={','.join(fields)} --format=csv,noheader,nounits"
+        r = execute(q)
+        if r.get("exit_code", 0) != 0:
+            return None
+        rows = []
+        for line in r["stdout"].strip().splitlines():
+            parts = [p.strip() for p in line.split(",")]
+            if len(parts) >= len(fields):
+                rows.append(dict(zip(fields, parts)))
+        return rows or None
+
+    core_rows = _query(core_fields) or []
+    ext_rows = _query(core_fields + extended_fields)
+    if ext_rows and len(ext_rows) == len(core_rows):
+        rows = ext_rows
+    else:
+        rows = core_rows  # extended unavailable; serve what we have
+
     gpus = []
-    for line in result["stdout"].strip().splitlines():
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) >= 7:
-            gpus.append({
-                "index": int(parts[0]),
-                "name": parts[1],
-                "utilization": _safe_float(parts[2]),
-                "memory_used": _safe_float(parts[3]),
-                "memory_total": _safe_float(parts[4]),
-                "temperature": _safe_float(parts[5]),
-                "power_draw": _safe_float(parts[6]),
-            })
+    for d in rows:
+        gpus.append({
+            "index": int(d["index"]),
+            "name": d.get("name", ""),
+            "uuid": d.get("uuid", ""),
+            "utilization": _safe_float(d.get("utilization.gpu", "")),
+            "memory_utilization": _safe_float(d.get("utilization.memory", "")),
+            "memory_used": _safe_float(d.get("memory.used", "")),
+            "memory_total": _safe_float(d.get("memory.total", "")),
+            "memory_free": _safe_float(d.get("memory.free", "")),
+            "temperature": _safe_float(d.get("temperature.gpu", "")),
+            "power_draw": _safe_float(d.get("power.draw", "")),
+            "power_limit": _safe_float(d.get("power.limit", "")),
+            "fan_speed": _safe_float(d.get("fan.speed", "")),
+            "pstate": d.get("pstate", ""),
+            "clock_graphics_cur": _safe_float(d.get("clocks.current.graphics", "")),
+            "clock_graphics_max": _safe_float(d.get("clocks.max.graphics", "")),
+            "clock_memory_cur": _safe_float(d.get("clocks.current.memory", "")),
+            "clock_memory_max": _safe_float(d.get("clocks.max.memory", "")),
+            "pcie_gen_cur": d.get("pcie.link.gen.current", ""),
+            "pcie_gen_max": d.get("pcie.link.gen.max", ""),
+            "pcie_width_cur": d.get("pcie.link.width.current", ""),
+            "pcie_width_max": d.get("pcie.link.width.max", ""),
+            "driver_version": d.get("driver_version", ""),
+            "compute_mode": d.get("compute_mode", ""),
+            "persistence_mode": d.get("persistence_mode", ""),
+        })
 
-    # Get per-GPU process info
+    # Per-GPU compute processes — enriched with user + runtime via ps.
     proc_result = execute(
-        "nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory,name --format=csv,noheader,nounits 2>/dev/null || true",
+        "nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory,name "
+        "--format=csv,noheader,nounits 2>/dev/null || true",
     )
-    uuid_result = execute(
-        "nvidia-smi --query-gpu=index,uuid --format=csv,noheader",
-    )
-    uuid_to_idx = {}
-    for line in uuid_result["stdout"].strip().splitlines():
-        parts = [p.strip() for p in line.split(",")]
-        if len(parts) >= 2:
-            uuid_to_idx[parts[1]] = int(parts[0])
-
     gpu_procs: dict[int, list] = {g["index"]: [] for g in gpus}
+    uuid_to_idx = {g["uuid"]: g["index"] for g in gpus}
+
+    pids_to_enrich = []
+    pending: list[tuple[int, dict]] = []
     for line in proc_result["stdout"].strip().splitlines():
         parts = [p.strip() for p in line.split(",")]
-        if len(parts) >= 4:
-            gpu_uuid = parts[0]
-            idx = uuid_to_idx.get(gpu_uuid)
-            if idx is not None and idx in gpu_procs:
-                gpu_procs[idx].append({
-                    "pid": parts[1],
-                    "memory_mib": _safe_float(parts[2]),
-                    "name": parts[3],
-                })
+        if len(parts) < 4:
+            continue
+        idx = uuid_to_idx.get(parts[0])
+        if idx is None:
+            continue
+        proc = {
+            "pid": parts[1],
+            "memory_mib": _safe_float(parts[2]),
+            "name": parts[3],
+        }
+        pids_to_enrich.append(parts[1])
+        pending.append((idx, proc))
+
+    # One ps call enriches all pids at once.
+    if pids_to_enrich:
+        pid_list = ",".join(pids_to_enrich)
+        ps_out = execute(
+            f"ps -o pid=,user=,etime= -p {pid_list} 2>/dev/null || true"
+        )
+        ps_info: dict[str, dict] = {}
+        for line in ps_out["stdout"].strip().splitlines():
+            tokens = line.split()
+            if len(tokens) >= 3:
+                ps_info[tokens[0]] = {"user": tokens[1], "runtime": tokens[2]}
+        for idx, proc in pending:
+            info = ps_info.get(proc["pid"], {})
+            proc["user"] = info.get("user", "?")
+            proc["runtime"] = info.get("runtime", "?")
+            gpu_procs[idx].append(proc)
 
     for g in gpus:
         g["processes"] = gpu_procs.get(g["index"], [])
+        # uuid is internal; drop from response to keep payload small
+        g.pop("uuid", None)
 
     return gpus
 
@@ -319,8 +414,10 @@ class CreateRequest(BaseModel):
     is_dir: bool = False
 
 
-def _file_root() -> str:
-    return PROJECT.get("directory", ".")
+def _file_root_for(cluster: str) -> str:
+    """Per-cluster file root for the file explorer and Claude tab cwd.
+    Falls back to the global `project.directory` if the cluster has no override."""
+    return ssh.directory_for(cluster) or PROJECT.get("directory", ".")
 
 
 async def _list_files_with_executor(execute, root, path):
@@ -364,24 +461,24 @@ async def _read_file_with_executor(execute, root, path):
 
 @app.get("/api/files/{cluster}")
 async def list_files(cluster: str, path: str = ""):
-    if cluster not in CLUSTERS:
+    if not _known_cluster(cluster):
         return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
     if not ssh.is_connected(cluster):
         return JSONResponse(content={"error": "Not connected"}, status_code=503)
 
     executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
-    return await _list_files_with_executor(executor, _file_root(), path)
+    return await _list_files_with_executor(executor, _file_root_for(cluster), path)
 
 
 @app.get("/api/file/{cluster}")
 async def read_file(cluster: str, path: str = ""):
-    if cluster not in CLUSTERS:
+    if not _known_cluster(cluster):
         return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
     if not ssh.is_connected(cluster):
         return JSONResponse(content={"error": "Not connected"}, status_code=503)
 
     executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
-    return await _read_file_with_executor(executor, _file_root(), path)
+    return await _read_file_with_executor(executor, _file_root_for(cluster), path)
 
 
 # ── Image viewing ────────────────────────────────────────────────────────────
@@ -423,13 +520,13 @@ async def _read_image_with_executor(execute, root, path):
 
 @app.get("/api/image/{cluster}")
 async def read_image(cluster: str, path: str = ""):
-    if cluster not in CLUSTERS:
+    if not _known_cluster(cluster):
         return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
     if not ssh.is_connected(cluster):
         return JSONResponse(content={"error": "Not connected"}, status_code=503)
 
     executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
-    return await _read_image_with_executor(executor, _file_root(), path)
+    return await _read_image_with_executor(executor, _file_root_for(cluster), path)
 
 
 # ── File download ────────────────────────────────────────────────────────────
@@ -459,13 +556,13 @@ async def _download_file_with_executor(execute, root, path):
 
 @app.get("/api/download/{cluster}")
 async def download_file(cluster: str, path: str = ""):
-    if cluster not in CLUSTERS:
+    if not _known_cluster(cluster):
         return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
     if not ssh.is_connected(cluster):
         return JSONResponse(content={"error": "Not connected"}, status_code=503)
 
     executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
-    return await _download_file_with_executor(executor, _file_root(), path)
+    return await _download_file_with_executor(executor, _file_root_for(cluster), path)
 
 
 # ── Folder download ─────────────────────────────────────────────────────
@@ -499,13 +596,13 @@ async def _download_folder_with_executor(execute, root, path):
 
 @app.get("/api/download-folder/{cluster}")
 async def download_folder(cluster: str, path: str = ""):
-    if cluster not in CLUSTERS:
+    if not _known_cluster(cluster):
         return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
     if not ssh.is_connected(cluster):
         return JSONResponse(content={"error": "Not connected"}, status_code=503)
 
     executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
-    return await _download_folder_with_executor(executor, _file_root(), path)
+    return await _download_folder_with_executor(executor, _file_root_for(cluster), path)
 
 
 # ── File rename ──────────────────────────────────────────────────────────────
@@ -532,13 +629,13 @@ async def _rename_file_with_executor(execute, root, old_path, new_name):
 
 @app.post("/api/rename/{cluster}")
 async def rename_file(cluster: str, req: RenameRequest):
-    if cluster not in CLUSTERS:
+    if not _known_cluster(cluster):
         return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
     if not ssh.is_connected(cluster):
         return JSONResponse(content={"error": "Not connected"}, status_code=503)
 
     executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
-    return await _rename_file_with_executor(executor, _file_root(), req.old_path, req.new_name)
+    return await _rename_file_with_executor(executor, _file_root_for(cluster), req.old_path, req.new_name)
 
 
 # ── File delete ──────────────────────────────────────────────────────────────
@@ -562,13 +659,13 @@ async def _delete_file_with_executor(execute, root, path):
 
 @app.post("/api/delete/{cluster}")
 async def delete_file(cluster: str, req: DeleteRequest):
-    if cluster not in CLUSTERS:
+    if not _known_cluster(cluster):
         return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
     if not ssh.is_connected(cluster):
         return JSONResponse(content={"error": "Not connected"}, status_code=503)
 
     executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
-    return await _delete_file_with_executor(executor, _file_root(), req.path)
+    return await _delete_file_with_executor(executor, _file_root_for(cluster), req.path)
 
 
 # ── File/folder create ───────────────────────────────────────────────────────
@@ -595,13 +692,13 @@ async def _create_file_with_executor(execute, root, path, name, is_dir):
 
 @app.post("/api/create/{cluster}")
 async def create_file(cluster: str, req: CreateRequest):
-    if cluster not in CLUSTERS:
+    if not _known_cluster(cluster):
         return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
     if not ssh.is_connected(cluster):
         return JSONResponse(content={"error": "Not connected"}, status_code=503)
 
     executor = lambda cmd, **kw: ssh.execute(cluster, cmd, **kw)
-    return await _create_file_with_executor(executor, _file_root(), req.path, req.name, req.is_dir)
+    return await _create_file_with_executor(executor, _file_root_for(cluster), req.path, req.name, req.is_dir)
 
 
 # ── Static files (must be last) ──────────────────────────────────────────────

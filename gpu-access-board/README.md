@@ -1,15 +1,14 @@
 # gpu-access-board
 
-A browser-based dashboard for monitoring and operating Salk's RunAI GPU clusters over SSH. View live GPU/CPU/RAM metrics, browse processes, run terminal commands, and launch Claude Code sessions from a single browser window.
+A browser-based dashboard for monitoring and operating Salk's RunAI GPU clusters over SSH. View live GPU/CPU/RAM metrics, browse processes, and launch Claude Code sessions from a single browser window.
 
 ## Features
 
 - **Single-mode login** — One SSH password unlocks every configured Salk cluster
 - **Overview** — All connected clusters at a glance with GPU utilization, memory, CPU load, RAM, and disk usage
-- **GPU Detail** — Per-GPU stats from `nvidia-smi`: utilization, memory, temperature, power, and running compute processes
+- **GPU Detail** — Per-GPU stats from `nvidia-smi`: utilization & memory util, VRAM, temperature, fan, power draw vs limit, P-state, graphics + memory clocks, PCIe gen/width, driver version, compute mode, and a per-process table with user / PID / runtime / VRAM / command
 - **Process Viewer** — Sortable, filterable process table (`ps aux`) per cluster
-- **Interactive Terminal** — Tabbed terminal emulator (xterm.js) with one tab per connected cluster, auto-cd to the project directory and `screen -d -r` to attach the configured session
-- **Claude Code** — Dedicated tab that launches Claude Code in a dedicated `claude-remote-access` screen session (separate from your other screens) with a file explorer sidebar and markdown viewer
+- **Claude Code** — Dedicated tab that launches Claude Code in a `claude-remote-access` screen session (kept separate from your other screens) with a file explorer sidebar and markdown viewer
 - **File Explorer** — Browse remote project files; markdown and image preview
 - **Dark / Light Mode** — Refined indigo/violet palette, saved across sessions
 - **GitHub Pages friendly** — The static frontend can live anywhere and point at a backend running locally on your laptop (since the backend is the one that needs Salk VPN access)
@@ -27,10 +26,14 @@ browser  ──► FastAPI (local)  ──► Salk RunAI cluster (over VPN)
 
 ## Setup
 
+From the repo root (one-time):
+
 ```bash
-conda env create -f environment.yml      # first time only, from the repo root
-conda activate vibes
+uv sync                       # creates .venv with everything this vibe needs
+source .venv/bin/activate     # or prefix commands with `uv run`
 ```
+
+If you don't have uv yet: `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
 ## Two ways to run
 
@@ -42,7 +45,7 @@ Serve the dashboard and the API from the same uvicorn process:
 
 ```bash
 cd gpu-access-board
-uvicorn app:app --host 0.0.0.0 --port 8000
+uv run uvicorn app:app --host 0.0.0.0 --port 8000
 ```
 
 Open <http://localhost:8000>. The static frontend is served from the same origin as the API — no extra setup.
@@ -56,7 +59,8 @@ The static frontend can be hosted from GitHub Pages and pointed at a backend run
 3. Click the ⚙ button (top-right of the login screen) and confirm the backend URL is `http://localhost:8000`. The page auto-detects this for `github.io` hosts.
 4. On your laptop, with the Salk VPN connected, run:
    ```bash
-   uvicorn app:app --host 127.0.0.1 --port 8000
+   cd gpu-access-board
+   uv run uvicorn app:app --host 127.0.0.1 --port 8000
    ```
 5. Back in the browser, type your SSH password and click **Connect**.
 
@@ -83,10 +87,9 @@ server:
     - https://kevinbian107.github.io
 
 project:
-  directory: /home/jovyan/vast/kaiwen/track-mjx   # file explorer root, terminal auto-cd
-  screen_session: train-vqvae                      # auto-attach in Terminal tab
-  claude_screen_session: claude-remote-access      # screen name for Claude tab (kept separate from other screens)
-  claude_user: devuser                             # su to this user before launching claude
+  directory: /home/jovyan/vast/kaiwen/code2act    # file explorer root, Claude tab cwd
+  claude_screen_session: claude-remote-access     # screen name for Claude tab (kept separate from other screens)
+  claude_user: devuser                            # su to this user before launching claude
 
 clusters:
   topovnl-salk:
@@ -98,8 +101,7 @@ clusters:
 
 | Key | Meaning |
 |---|---|
-| `project.directory` | File explorer root, terminal auto-cd, Claude working directory |
-| `project.screen_session` | Auto-attached via `screen -d -r` in the Terminal tab |
+| `project.directory` | File explorer root and Claude tab working directory |
 | `project.claude_screen_session` | The screen name used by the Claude tab — `claude-remote-access` keeps it distinct from any other `claude` screens you might have running manually |
 | `project.claude_user` | User to `su` into before launching Claude |
 | `clusters.*` | SSH targets (host / port / username), all unlocked with the same password |

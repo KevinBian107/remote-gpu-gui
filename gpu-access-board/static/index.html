@@ -5,7 +5,8 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>GPU Access Board · Salk</title>
-  <link rel="stylesheet" href="style.css">
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="stylesheet" href="style.css?v=4">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css">
 </head>
 <body>
@@ -44,17 +45,45 @@
 
   <!-- Settings dialog -->
   <div id="settings-overlay" class="modal-overlay hidden">
-    <div class="modal">
-      <h3>Backend</h3>
-      <p class="modal-hint">
-        Where this page should send API and WebSocket calls. Defaults to the
-        page's origin when served by the backend, or
-        <code>http://localhost:8000</code> when opened from GitHub Pages.
-      </p>
+    <div class="modal modal-wide">
+      <h3>Settings</h3>
+
       <label>
         Backend URL
         <input type="text" id="settings-backend-url" placeholder="http://localhost:8000" autocomplete="off">
       </label>
+      <p class="modal-hint">
+        Where this page sends API/WebSocket calls. Defaults to the page's
+        origin when served by FastAPI, or <code>http://localhost:8000</code>
+        when opened from GitHub Pages.
+      </p>
+
+      <h4 class="modal-section">Clusters</h4>
+      <p class="modal-hint">
+        Edit cluster SSH targets and the Claude tab's root directory per
+        cluster. Claude dir falls back to the shared default from
+        <code>config.yaml</code> when blank.
+      </p>
+      <div id="cluster-editor">
+        <table id="cluster-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Host</th>
+              <th class="col-port">Port</th>
+              <th>User</th>
+              <th>Claude dir</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="cluster-rows"></tbody>
+        </table>
+        <div class="cluster-editor-actions">
+          <button id="add-cluster-btn" class="btn-secondary">+ Add cluster</button>
+          <button id="reset-clusters-btn" class="btn-secondary">Reset to defaults</button>
+        </div>
+      </div>
+
       <div class="modal-actions">
         <button id="settings-cancel" class="btn-secondary">Cancel</button>
         <button id="settings-save" class="btn-primary">Save</button>
@@ -85,7 +114,6 @@
         <button class="tab active" data-tab="overview">Overview</button>
         <button class="tab" data-tab="gpu">GPU Detail</button>
         <button class="tab" data-tab="processes">Processes</button>
-        <button class="tab" data-tab="terminal">Terminal</button>
         <button class="tab" data-tab="claude">Claude</button>
       </nav>
 
@@ -124,12 +152,6 @@
         </div>
       </section>
 
-      <!-- Terminal tab -->
-      <section id="tab-terminal" class="tab-content">
-        <div id="terminal-tabs"></div>
-        <div id="terminal-container"></div>
-      </section>
-
       <!-- Claude tab -->
       <section id="tab-claude" class="tab-content">
         <div class="tab-toolbar">
@@ -137,6 +159,7 @@
             <select id="claude-cluster-select"></select>
           </label>
           <button id="claude-connect-btn">Launch</button>
+          <button id="claude-cost-btn" class="btn-secondary btn-sm" title="Send /cost to the Claude session">Show /cost</button>
           <span class="claude-screen-hint" id="claude-screen-hint"></span>
         </div>
         <div id="claude-body">
@@ -170,6 +193,6 @@
   <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.0/marked.min.js"></script>
-  <script src="app.js"></script>
+  <script src="app.js?v=4"></script>
 </body>
 </html>

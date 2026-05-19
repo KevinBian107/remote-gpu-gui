@@ -7,6 +7,7 @@
  */
 
 const LS_BACKEND = "gpu-access-board.backend_url";
+const LS_CLUSTERS = "gpu-access-board.clusters";  // user-edited cluster defs
 
 function defaultBackend() {
   // Served by FastAPI itself → same-origin (relative URLs).
@@ -56,11 +57,11 @@ function wsUrl(path) {
 
 /* ── State ─────────────────────────────────────────────────────────────────── */
 
-let clusters = {};          // {name: {host, connected}}
+let clusters = {};          // {name: {host, connected}} — runtime state from backend
+let clustersConfig = null;  // {name: {host, port, username, directory}} — user-editable
+let defaultsCache = null;   // {clusters, project} from /api/defaults
 let metricsCache = {};      // {name: {gpu: [...], system: {...}}}
 let pollInterval = null;
-let terminals = {};         // {name: {term, ws, fitAddon}}
-let activeTerminal = null;
 let claudeTerminal = null;  // {term, ws, fitAddon, cluster}
 let projectConfig = {};     // from /api/config
 
@@ -111,6 +112,15 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("login-settings-btn").addEventListener("click", openSettings);
   document.getElementById("settings-cancel").addEventListener("click", closeSettings);
   document.getElementById("settings-save").addEventListener("click", saveSettings);
+  document.getElementById("add-cluster-btn").addEventListener("click", () => addClusterRow());
+  document.getElementById("reset-clusters-btn").addEventListener("click", resetClustersToDefaults);
+
+  // Claude /cost button
+  document.getElementById("claude-cost-btn").addEventListener("click", sendClaudeCost);
+
+  // Load defaults so the Settings UI has something to show on first open.
+  // Don't block boot on it — runs in background.
+  loadDefaults();
 });
 
 function showBackendInfo() {
@@ -121,9 +131,11 @@ function showBackendInfo() {
   el.textContent = `backend: ${where}`;
 }
 
-function openSettings() {
+async function openSettings() {
   const dlg = document.getElementById("settings-overlay");
   document.getElementById("settings-backend-url").value = getBackend();
+  await loadDefaults();
+  renderClusterEditor();
   dlg.classList.remove("hidden");
 }
 
@@ -133,8 +145,96 @@ function closeSettings() {
 
 function saveSettings() {
   setBackend(document.getElementById("settings-backend-url").value);
+
+  // Harvest cluster rows into clustersConfig
+  const rows = document.querySelectorAll("#cluster-rows tr");
+  const out = {};
+  for (const tr of rows) {
+    const name = tr.querySelector('[data-field="name"]').value.trim();
+    if (!name) continue;
+    const host = tr.querySelector('[data-field="host"]').value.trim();
+    const port = parseInt(tr.querySelector('[data-field="port"]').value, 10);
+    const username = tr.querySelector('[data-field="username"]').value.trim();
+    const directory = tr.querySelector('[data-field="directory"]').value.trim();
+    if (!host || !username) continue;
+    out[name] = {
+      host,
+      port: Number.isFinite(port) ? port : 22,
+      username,
+      directory: directory || null,
+    };
+  }
+  clustersConfig = out;
+  localStorage.setItem(LS_CLUSTERS, JSON.stringify(clustersConfig));
+
   closeSettings();
   showBackendInfo();
+}
+
+// ── Cluster config + defaults ───────────────────────────────────────────────
+
+async function loadDefaults() {
+  if (defaultsCache) return defaultsCache;
+  try {
+    const resp = await fetch(apiUrl("/api/defaults"));
+    if (resp.ok) defaultsCache = await resp.json();
+  } catch (e) {
+    defaultsCache = { clusters: {}, project: {} };
+  }
+  // If no user-saved clusters yet, seed from defaults so first-time UX works.
+  const stored = localStorage.getItem(LS_CLUSTERS);
+  if (stored) {
+    try { clustersConfig = JSON.parse(stored); } catch (e) { clustersConfig = null; }
+  }
+  if (!clustersConfig && defaultsCache?.clusters) {
+    clustersConfig = JSON.parse(JSON.stringify(defaultsCache.clusters));
+  }
+  return defaultsCache;
+}
+
+function resetClustersToDefaults() {
+  if (!defaultsCache?.clusters) return;
+  clustersConfig = JSON.parse(JSON.stringify(defaultsCache.clusters));
+  renderClusterEditor();
+}
+
+function renderClusterEditor() {
+  const tbody = document.getElementById("cluster-rows");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+  const defaultDir = defaultsCache?.project?.directory || "";
+  for (const [name, cfg] of Object.entries(clustersConfig || {})) {
+    addClusterRow({ name, ...cfg }, defaultDir);
+  }
+}
+
+function addClusterRow(cfg = {}, defaultDir = "") {
+  const tbody = document.getElementById("cluster-rows");
+  if (!tbody) return;
+  if (!defaultDir) defaultDir = defaultsCache?.project?.directory || "";
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td><input data-field="name" type="text" value="${escAttr(cfg.name)}" placeholder="cluster-name"></td>
+    <td><input data-field="host" type="text" value="${escAttr(cfg.host)}" placeholder="10.0.0.1"></td>
+    <td><input data-field="port" type="number" min="1" max="65535" value="${cfg.port ?? 22}"></td>
+    <td><input data-field="username" type="text" value="${escAttr(cfg.username)}" placeholder="root"></td>
+    <td><input data-field="directory" type="text" value="${escAttr(cfg.directory || "")}" placeholder="${escAttr(defaultDir)}"></td>
+    <td><button class="cluster-row-remove" title="Remove">✕</button></td>
+  `;
+  tr.querySelector(".cluster-row-remove").addEventListener("click", () => tr.remove());
+  tbody.appendChild(tr);
+}
+
+function escAttr(s) {
+  return String(s == null ? "" : s).replace(/"/g, "&quot;");
+}
+
+// ── Claude /cost button ─────────────────────────────────────────────────────
+
+function sendClaudeCost() {
+  if (claudeTerminal?.ws?.readyState === WebSocket.OPEN) {
+    claudeTerminal.ws.send("/cost\n");
+  }
 }
 
 /* ── Login / Logout ───────────────────────────────────────────────────────── */
@@ -157,10 +257,17 @@ async function doLogin() {
   statusEl.className = "";
 
   try {
+    // Ensure we have cluster defs to send; if user never opened settings, seed from defaults.
+    if (!clustersConfig) await loadDefaults();
+
+    const body = { password: pw };
+    if (clustersConfig && Object.keys(clustersConfig).length > 0) {
+      body.clusters = clustersConfig;
+    }
     const resp = await fetch(apiUrl("/api/login"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: pw }),
+      body: JSON.stringify(body),
     });
     const data = await resp.json();
 
@@ -191,13 +298,6 @@ async function doLogin() {
 }
 
 function doLogout() {
-  Object.values(terminals).forEach(({ ws, term }) => {
-    if (ws) ws.close();
-    if (term) term.dispose();
-  });
-  terminals = {};
-  activeTerminal = null;
-
   if (claudeTerminal) {
     if (claudeTerminal.ws) claudeTerminal.ws.close();
     if (claudeTerminal.term) claudeTerminal.term.dispose();
@@ -244,11 +344,6 @@ async function enterDashboard() {
   populateSelect("claude-cluster-select");
   updateClaudeScreenHint();
 
-  buildTerminalTabs();
-  if (activeTerminal) {
-    initTerminal(activeTerminal);
-  }
-
   await fetchAllMetrics();
   renderOverview();
   pollInterval = setInterval(fetchAllMetrics, 5000);
@@ -282,7 +377,6 @@ function switchTab(tab) {
 
   if (tab === "gpu") renderGPUDetail();
   if (tab === "processes") fetchProcesses();
-  if (tab === "terminal") fitActiveTerminal();
   if (tab === "claude") fitClaudeTerminal();
 }
 
@@ -324,12 +418,12 @@ function renderClusterCard(name, info) {
 
   const m = metricsCache[name];
   if (!info.connected || !m) {
-    card.innerHTML = `<h3><span class="status-dot disconnected"></span>${esc(name)}</h3><p class="not-connected-msg">Not connected</p>`;
+    card.innerHTML = `<h3><span class="status-dot disconnected"></span>${esc(name)}</h3><p class="not-connected-msg">${info.connected ? "Waiting for metrics…" : "Not connected"}</p>`;
     return card;
   }
 
-  const sys = m.system;
-  const gpus = m.gpu;
+  const sys = m.system || {};
+  const gpus = m.gpu || [];
   const memPct = sys.mem_total_mb ? Math.round(sys.mem_used_mb / sys.mem_total_mb * 100) : 0;
 
   const avgGpuUtil = gpus.length ? Math.round(gpus.reduce((a, g) => a + g.utilization, 0) / gpus.length) : 0;
@@ -384,32 +478,102 @@ function renderGPUDetail() {
 
     const section = document.createElement("div");
     section.className = "gpu-cluster-section";
-    section.innerHTML = `<h3 class="gpu-cluster-heading"><span class="status-dot connected"></span>${esc(name)}</h3>`;
+
+    // Cluster heading + summary chips
+    const totalGpus = m.gpu.length;
+    const totalVramUsed = m.gpu.reduce((s, g) => s + (g.memory_used || 0), 0);
+    const totalVramTotal = m.gpu.reduce((s, g) => s + (g.memory_total || 0), 0);
+    const totalPower = m.gpu.reduce((s, g) => s + (g.power_draw || 0), 0);
+    const totalPowerLimit = m.gpu.reduce((s, g) => s + (g.power_limit || 0), 0);
+    const avgUtil = totalGpus ? Math.round(m.gpu.reduce((s, g) => s + (g.utilization || 0), 0) / totalGpus) : 0;
+    const driverVersion = m.gpu[0]?.driver_version || "?";
+    const activeCount = m.gpu.filter(g => (g.processes || []).length > 0).length;
+
+    section.innerHTML = `
+      <div class="gpu-cluster-heading">
+        <span class="status-dot connected"></span>
+        <span>${esc(name)}</span>
+        <span class="gpu-cluster-chips">
+          <span class="chip">${totalGpus} GPU${totalGpus === 1 ? "" : "s"}</span>
+          <span class="chip">${activeCount} active</span>
+          <span class="chip">avg util ${avgUtil}%</span>
+          <span class="chip">VRAM ${formatGiB(totalVramUsed)}/${formatGiB(totalVramTotal)}</span>
+          <span class="chip">${Math.round(totalPower)}/${Math.round(totalPowerLimit)} W</span>
+          <span class="chip">driver ${esc(driverVersion)}</span>
+        </span>
+      </div>
+    `;
 
     const grid = document.createElement("div");
     grid.className = "gpu-grid";
 
     for (const g of m.gpu) {
       const memPct = g.memory_total ? Math.round(g.memory_used / g.memory_total * 100) : 0;
+      const powerPct = g.power_limit ? Math.round(g.power_draw / g.power_limit * 100) : 0;
+      const clockPct = g.clock_graphics_max ? Math.round(g.clock_graphics_cur / g.clock_graphics_max * 100) : 0;
+
       const card = document.createElement("div");
       card.className = "gpu-card";
       card.innerHTML = `
-        <h4>GPU ${g.index}: ${esc(g.name)}</h4>
-        ${metricBarHTML("Utilization", Math.round(g.utilization))}
-        ${metricBarHTML("Memory", memPct, `${Math.round(g.memory_used)} / ${Math.round(g.memory_total)} MiB`)}
-        <div class="gpu-stats-inline">
-          <span class="gpu-stat"><strong>${g.temperature}°C</strong> temp</span>
-          <span class="gpu-stat"><strong>${g.power_draw} W</strong> power</span>
+        <div class="gpu-card-head">
+          <h4>GPU ${g.index} <span class="gpu-card-name">${esc(g.name)}</span></h4>
+          <span class="gpu-pstate" title="performance state">${esc(g.pstate || "?")}</span>
         </div>
+
+        <div class="gpu-card-body">
+          <div class="gpu-card-bars">
+            ${metricBarHTML("Util", Math.round(g.utilization))}
+            ${metricBarHTML("Mem util", Math.round(g.memory_utilization || 0))}
+            ${metricBarHTML("VRAM", memPct, `${formatGiB(g.memory_used)} / ${formatGiB(g.memory_total)}`)}
+            ${metricBarHTML("Power", powerPct, `${Math.round(g.power_draw)} / ${Math.round(g.power_limit)} W`)}
+            ${metricBarHTML("Clock", clockPct, `${Math.round(g.clock_graphics_cur)} / ${Math.round(g.clock_graphics_max)} MHz`)}
+          </div>
+
+          <div class="gpu-stats-grid">
+            <div class="gpu-stat-cell">
+              <span class="gpu-stat-label">Temp</span>
+              <span class="gpu-stat-value ${tempClass(g.temperature)}">${g.temperature ? Math.round(g.temperature) + "°C" : "—"}</span>
+            </div>
+            <div class="gpu-stat-cell">
+              <span class="gpu-stat-label">Fan</span>
+              <span class="gpu-stat-value">${g.fan_speed > 0 ? Math.round(g.fan_speed) + "%" : "—"}</span>
+            </div>
+            <div class="gpu-stat-cell">
+              <span class="gpu-stat-label">Mem clk</span>
+              <span class="gpu-stat-value">${Math.round(g.clock_memory_cur)} MHz</span>
+            </div>
+            <div class="gpu-stat-cell">
+              <span class="gpu-stat-label">PCIe</span>
+              <span class="gpu-stat-value">gen ${esc(g.pcie_gen_cur)} · x${esc(g.pcie_width_cur)}</span>
+            </div>
+            <div class="gpu-stat-cell">
+              <span class="gpu-stat-label">Free VRAM</span>
+              <span class="gpu-stat-value">${formatGiB(g.memory_free)}</span>
+            </div>
+            <div class="gpu-stat-cell">
+              <span class="gpu-stat-label">Mode</span>
+              <span class="gpu-stat-value">${esc(g.compute_mode || "?")}</span>
+            </div>
+          </div>
+        </div>
+
         <div class="gpu-processes">
           <h5>Processes (${g.processes.length})</h5>
           ${g.processes.length === 0 ? '<p class="no-processes">No compute processes</p>' :
-            g.processes.map((p) => `
-              <div class="gpu-proc-row">
-                <span>PID ${esc(p.pid)}: ${esc(p.name)}</span>
-                <span>${p.memory_mib} MiB</span>
-              </div>
-            `).join("")}
+            `<table class="gpu-proc-table">
+              <thead><tr><th>User</th><th>PID</th><th>Runtime</th><th>VRAM</th><th>Command</th></tr></thead>
+              <tbody>
+                ${g.processes.map((p) => `
+                  <tr>
+                    <td>${esc(p.user || "?")}</td>
+                    <td>${esc(p.pid)}</td>
+                    <td>${esc(p.runtime || "?")}</td>
+                    <td>${formatGiB(p.memory_mib)}</td>
+                    <td class="proc-cmd" title="${esc(p.name)}">${esc(p.name)}</td>
+                  </tr>
+                `).join("")}
+              </tbody>
+            </table>`}
         </div>
       `;
       grid.appendChild(card);
@@ -422,6 +586,19 @@ function renderGPUDetail() {
   if (!container.children.length) {
     container.innerHTML = "<p>No GPU data available.</p>";
   }
+}
+
+function formatGiB(mib) {
+  const n = Number(mib) || 0;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)} GiB`;
+  return `${Math.round(n)} MiB`;
+}
+
+function tempClass(t) {
+  const v = Number(t) || 0;
+  if (v >= 80) return "hot";
+  if (v >= 65) return "warm";
+  return "cool";
 }
 
 /* ── Process viewer ───────────────────────────────────────────────────────── */
@@ -492,102 +669,7 @@ function filterProcesses() {
   renderProcessTable();
 }
 
-/* ── Terminal ─────────────────────────────────────────────────────────────── */
-
-function buildTerminalTabs() {
-  const tabsContainer = document.getElementById("terminal-tabs");
-  const termContainer = document.getElementById("terminal-container");
-  tabsContainer.innerHTML = "";
-  termContainer.innerHTML = "";
-
-  const connectedClusters = Object.entries(clusters).filter(([, v]) => v.connected).map(([k]) => k);
-
-  connectedClusters.forEach((name, i) => {
-    const btn = document.createElement("button");
-    btn.className = "term-tab" + (i === 0 ? " active" : "");
-    btn.textContent = name;
-    btn.dataset.termName = name;
-    btn.addEventListener("click", () => switchTerminal(name));
-    tabsContainer.appendChild(btn);
-
-    const div = document.createElement("div");
-    div.className = "term-instance" + (i === 0 ? " active" : "");
-    div.id = `term-${name}`;
-    termContainer.appendChild(div);
-
-    terminals[name] = { term: null, ws: null, fitAddon: null, initialized: false };
-  });
-
-  if (connectedClusters.length > 0) {
-    activeTerminal = connectedClusters[0];
-  }
-}
-
-function switchTerminal(name) {
-  activeTerminal = name;
-
-  document.querySelectorAll(".term-tab").forEach((b) => b.classList.toggle("active", b.dataset.termName === name));
-  document.querySelectorAll(".term-instance").forEach((d) => d.classList.toggle("active", d.id === `term-${name}`));
-
-  initTerminal(name);
-  fitActiveTerminal();
-}
-
-function initTerminal(name) {
-  if (terminals[name].initialized) return;
-  terminals[name].initialized = true;
-
-  const container = document.getElementById(`term-${name}`);
-  const term = new Terminal({
-    cursorBlink: true,
-    fontSize: 14,
-    fontFamily: "'SF Mono', Menlo, Monaco, 'Courier New', monospace",
-    theme: currentTermTheme(),
-  });
-
-  const fitAddon = new FitAddon.FitAddon();
-  term.loadAddon(fitAddon);
-  term.open(container);
-  fitAddon.fit();
-
-  const ws = new WebSocket(wsUrl(`/ws/terminal/${name}`));
-
-  ws.onopen = () => {
-    term.writeln(`\x1b[32mConnected to ${name}\x1b[0m\r`);
-    ws.send(`\x01RESIZE:${term.cols},${term.rows}`);
-
-    const projDir = projectConfig.directory || "~";
-    const screenName = projectConfig.screen_session || "train-vqvae";
-    setTimeout(() => {
-      ws.send(`cd ${projDir}\n`);
-      setTimeout(() => ws.send(`screen -ls | grep -q ${screenName} && screen -d -r ${screenName}\n`), 300);
-    }, 500);
-  };
-
-  ws.onmessage = (ev) => term.write(ev.data);
-  ws.onclose = () => term.writeln("\r\n\x1b[31mConnection closed.\x1b[0m");
-  ws.onerror = () => term.writeln("\r\n\x1b[31mWebSocket error.\x1b[0m");
-
-  term.onData((data) => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(data);
-  });
-
-  term.onResize(({ cols, rows }) => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(`\x01RESIZE:${cols},${rows}`);
-  });
-
-  terminals[name] = { term, ws, fitAddon, initialized: true };
-}
-
-function fitActiveTerminal() {
-  if (!activeTerminal || !terminals[activeTerminal]?.fitAddon) return;
-  setTimeout(() => {
-    try { terminals[activeTerminal].fitAddon.fit(); } catch (e) {}
-  }, 50);
-}
-
 window.addEventListener("resize", () => {
-  fitActiveTerminal();
   fitClaudeTerminal();
 });
 
@@ -1083,9 +1165,6 @@ function applyTheme(theme) {
   document.getElementById("login-theme-toggle").textContent = emoji;
 
   const termTheme = TERM_THEMES[theme];
-  Object.values(terminals).forEach(({ term }) => {
-    if (term) term.options.theme = termTheme;
-  });
   if (claudeTerminal?.term) {
     claudeTerminal.term.options.theme = termTheme;
   }

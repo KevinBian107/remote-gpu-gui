@@ -277,6 +277,98 @@ body {
   width: 440px;
   max-width: 90vw;
   box-shadow: var(--shadow-lg);
+  max-height: 88vh;
+  overflow-y: auto;
+}
+
+.modal-wide {
+  width: 820px;
+}
+
+.modal-section {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--text-heading);
+  margin-top: 18px;
+  margin-bottom: 6px;
+}
+
+#cluster-editor {
+  margin-bottom: 14px;
+}
+
+#cluster-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.78rem;
+}
+
+#cluster-table th {
+  text-align: left;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 0.65rem;
+  color: var(--text-dim);
+  padding: 4px 6px;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+#cluster-table td {
+  padding: 4px 4px;
+}
+
+#cluster-table .col-port { width: 70px; }
+
+#cluster-table input {
+  width: 100%;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 6px 8px;
+  color: var(--text);
+  font-size: 0.77rem;
+  font-family: "SF Mono", Menlo, monospace;
+  outline: none;
+  transition: border-color var(--transition);
+}
+
+#cluster-table input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-subtle);
+}
+
+#cluster-table input::placeholder {
+  color: var(--text-dim);
+  opacity: 0.5;
+}
+
+.cluster-row-remove {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: 5px;
+  width: 26px;
+  height: 28px;
+  font-size: 0.7rem;
+  transition: all var(--transition);
+}
+
+.cluster-row-remove:hover {
+  color: var(--red);
+  border-color: var(--red);
+}
+
+.cluster-editor-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.btn-sm {
+  padding: 5px 10px;
+  font-size: 0.74rem;
 }
 
 .modal h3 {
@@ -746,13 +838,52 @@ body {
   display: flex;
   align-items: center;
   gap: 9px;
+  flex-wrap: wrap;
   letter-spacing: -0.01em;
+}
+
+.gpu-cluster-chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.chip {
+  font-size: 0.7rem;
+  font-weight: 500;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--bg-active);
+  color: var(--text-dim);
+  font-family: "SF Mono", Menlo, monospace;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .gpu-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(560px, 1fr));
   gap: 14px;
+}
+
+.gpu-card-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  margin: 8px 0 4px;
+}
+
+.gpu-card-bars {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+@media (max-width: 720px) {
+  .gpu-grid { grid-template-columns: 1fr; }
+  .gpu-card-body { grid-template-columns: 1fr; }
 }
 
 .gpu-card {
@@ -769,31 +900,114 @@ body {
   box-shadow: var(--shadow);
 }
 
+.gpu-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 12px;
+  gap: 12px;
+}
+
 .gpu-card h4 {
   font-size: 0.88rem;
   font-weight: 600;
   color: var(--text-heading);
-  margin-bottom: 12px;
   letter-spacing: -0.005em;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gpu-card-name {
+  font-weight: 400;
+  font-size: 0.74rem;
+  color: var(--text-dim);
+  letter-spacing: 0;
+}
+
+.gpu-pstate {
+  font-size: 0.7rem;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-family: "SF Mono", Menlo, monospace;
+  flex-shrink: 0;
 }
 
 .gpu-card .metric-row { font-size: 0.82rem; }
 
-.gpu-stats-inline {
+.gpu-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 6px 14px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  background: rgba(255, 255, 255, 0.015);
+  align-self: stretch;
+}
+
+.gpu-stat-cell {
   display: flex;
-  gap: 18px;
-  margin-bottom: 10px;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.75rem;
 }
 
-.gpu-stat {
-  font-size: 0.76rem;
+.gpu-stat-label {
   color: var(--text-dim);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 0.65rem;
 }
 
-.gpu-stat strong {
+.gpu-stat-value {
   color: var(--text);
-  font-weight: 600;
   font-family: "SF Mono", Menlo, monospace;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.gpu-stat-value.cool { color: var(--green); }
+.gpu-stat-value.warm { color: var(--yellow); }
+.gpu-stat-value.hot  { color: var(--red); }
+
+.gpu-proc-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.72rem;
+  font-family: "SF Mono", Menlo, monospace;
+  margin-top: 4px;
+}
+
+.gpu-proc-table th {
+  text-align: left;
+  padding: 4px 8px 4px 0;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 0.62rem;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.gpu-proc-table td {
+  padding: 4px 8px 4px 0;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+.gpu-proc-table td.proc-cmd {
+  color: var(--text-dim);
+  max-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .gpu-processes {
@@ -883,55 +1097,6 @@ body {
 
 #process-table tbody tr { transition: background var(--transition); }
 #process-table tbody tr:hover { background: var(--bg-hover); }
-
-/* ── Terminal ─────────────────────────────────────────────────────────────── */
-
-#terminal-tabs {
-  display: flex;
-  gap: 2px;
-  flex-shrink: 0;
-}
-
-.term-tab {
-  padding: 8px 18px;
-  border: 1px solid var(--border);
-  border-bottom: none;
-  border-radius: var(--radius) var(--radius) 0 0;
-  background: var(--bg);
-  color: var(--text-dim);
-  cursor: pointer;
-  font-size: 0.78rem;
-  font-weight: 500;
-  font-family: inherit;
-  transition: all var(--transition);
-}
-
-.term-tab:hover { color: var(--text); background: var(--bg-hover); }
-
-.term-tab.active {
-  background: var(--terminal-bg);
-  color: var(--text-heading);
-  border-color: var(--accent);
-  border-bottom-color: var(--terminal-bg);
-  z-index: 2;
-}
-
-#terminal-container {
-  flex: 1;
-  background: var(--terminal-bg);
-  border: 1px solid var(--border);
-  border-radius: 0 var(--radius-lg) var(--radius-lg) var(--radius-lg);
-  overflow: hidden;
-  position: relative;
-}
-
-.term-instance {
-  display: none;
-  position: absolute;
-  inset: 6px;
-}
-
-.term-instance.active { display: block; }
 
 /* ── Claude tab ───────────────────────────────────────────────────────────── */
 

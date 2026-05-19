@@ -1,0 +1,16 @@
+[project]
+name = "vibes"
+version = "0.1.0"
+description = "Lightweight, self-contained research tools sharing one Python env."
+requires-python = ">=3.10"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "paramiko",
+    "pyyaml",
+    "psutil",
+    "requests",
+]
+
+[tool.uv]
+# uv-native lock lives in uv.lock. Run `uv sync` to install.

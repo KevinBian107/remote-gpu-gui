@@ -11,10 +11,9 @@ server:
 
 # ── Project ───────────────────────────────────────────────────────────────────
 project:
-  directory: /home/jovyan/vast/kaiwen/track-mjx
-  screen_session: train-vqvae          # auto-attach in Terminal tab (if running)
-  claude_screen_session: claude-remote-access   # screen session name for Claude tab
-  claude_user: devuser                 # su to this user before launching claude
+  directory: /home/jovyan/vast/kaiwen/code2act    # file explorer root & Claude tab cwd
+  claude_screen_session: claude-remote-access     # screen session name for Claude tab
+  claude_user: devuser                            # su to this user before launching claude
 
 # ── Clusters (Salk RunAI) ─────────────────────────────────────────────────────
 clusters:
