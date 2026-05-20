@@ -86,6 +86,47 @@ async def get_defaults():
     return JSONResponse(content={"clusters": CLUSTERS, "project": PROJECT})
 
 
+@app.post("/api/claude/restart/{cluster}")
+async def restart_claude(cluster: str):
+    """Kill the remote claude screen session so the next Launch starts fresh
+    (and `cd`s into whatever directory is currently configured)."""
+    if not _known_cluster(cluster):
+        return JSONResponse(content={"error": "Unknown cluster"}, status_code=404)
+    if not ssh.is_connected(cluster):
+        return JSONResponse(content={"error": "Not connected"}, status_code=503)
+    session = PROJECT.get("claude_screen_session") or "claude-remote-access"
+    user = PROJECT.get("claude_user") or "devuser"
+    cmd = (
+        f"su - {user} -c "
+        f"\"screen -X -S {session} quit 2>/dev/null; "
+        f"screen -wipe 2>/dev/null; true\""
+    )
+    try:
+        await asyncio.to_thread(ssh.execute, cluster, cmd, 10)
+        return JSONResponse(content={"ok": True})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
+@app.post("/api/clusters/configure")
+async def reconfigure_clusters(clusters_req: dict[str, ClusterDef]):
+    """Live-update cluster definitions (host/port/user/directory) without
+    requiring a logout. Used by the Settings dialog so directory edits take
+    effect immediately for both the Claude tab `cd` target and file routes.
+
+    Existing SSH connections for clusters that remain in the set are preserved;
+    clusters removed from the set get their connections dropped.
+    """
+    clusters = {k: v.model_dump() for k, v in clusters_req.items()}
+    # Same merge as login: empty `directory` inherits from config.yaml.
+    for name, cfg in clusters.items():
+        yaml_cfg = CLUSTERS.get(name) or {}
+        if not cfg.get("directory") and yaml_cfg.get("directory"):
+            cfg["directory"] = yaml_cfg["directory"]
+    ssh.configure(clusters)
+    return JSONResponse(content={"ok": True})
+
+
 @app.get("/api/clusters")
 async def list_clusters():
     default_dir = PROJECT.get("directory", "")

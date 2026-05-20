@@ -142,7 +142,7 @@ function closeSettings() {
   document.getElementById("settings-overlay").classList.add("hidden");
 }
 
-function saveSettings() {
+async function saveSettings() {
   setBackend(document.getElementById("settings-backend-url").value);
 
   // Harvest cluster rows into clustersConfig
@@ -165,6 +165,28 @@ function saveSettings() {
   }
   clustersConfig = out;
   localStorage.setItem(LS_CLUSTERS, JSON.stringify(clustersConfig));
+
+  // If already logged in, push the new cluster config to the backend live so
+  // directory changes take effect for Claude `cd` and the file explorer
+  // without needing a logout/login cycle.
+  if (runaiConnected && clustersConfig && Object.keys(clustersConfig).length > 0) {
+    try {
+      await fetch(apiUrl("/api/clusters/configure"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(clustersConfig),
+      });
+      // Re-fetch runtime cluster state (now includes the new directories).
+      const resp = await fetch(apiUrl("/api/clusters"));
+      if (resp.ok) clusters = await resp.json();
+      // Reflect the new directory in the file explorer + screen-hint badge.
+      updateFileExplorerLabel();
+      updateClaudeScreenHint();
+      refreshFileTreeIfOpen();
+    } catch (e) {
+      console.warn("Failed to apply cluster config to backend:", e);
+    }
+  }
 
   closeSettings();
   showBackendInfo();
@@ -407,11 +429,26 @@ function showClaudeTerminalFor(cluster) {
   }
 }
 
+function claudeSessionName(cluster) {
+  // Per-directory screen-session naming. Each (cluster, dir) gets its own
+  // session, so changing the Claude dir in Settings creates a brand-new
+  // session in the new dir instead of re-attaching the old one (which would
+  // keep the original cwd no matter what we `cd` to).
+  const base = projectConfig.claude_screen_session || "claude-remote-access";
+  const dir = clusterDir(cluster);
+  const slug = (dir.split("/").filter(Boolean).pop() || "default")
+    .replace(/[^a-zA-Z0-9_-]/g, "_");
+  return `${base}-${slug}`;
+}
+
 function updateClaudeScreenHint() {
   const el = document.getElementById("claude-screen-hint");
   if (!el) return;
-  const screen = projectConfig.claude_screen_session || "claude-remote-access";
-  el.textContent = `screen: ${screen}`;
+  if (!activeClaudeCluster) {
+    el.textContent = "";
+    return;
+  }
+  el.textContent = `screen: ${claudeSessionName(activeClaudeCluster)}`;
 }
 
 /* ── Tab switching ────────────────────────────────────────────────────────── */
@@ -720,16 +757,31 @@ window.addEventListener("resize", () => {
 
 /* ── Claude terminal ──────────────────────────────────────────────────────── */
 
-function launchClaude() {
+async function launchClaude() {
   const cluster = activeClaudeCluster;
   if (!cluster) return;
 
-  // If a session already exists for this cluster, just bring it to the front.
-  if (claudeTerminals[cluster]) {
+  const projDir = clusterDir(cluster);
+  const sessionName = claudeSessionName(cluster);
+  const existing = claudeTerminals[cluster];
+  const alive = existing && existing.ws && existing.ws.readyState === WebSocket.OPEN;
+  const sameSession = existing && existing.sessionName === sessionName;
+
+  // Live + targeting the same screen session → just bring it forward.
+  if (alive && sameSession) {
     showClaudeTerminalFor(cluster);
     initFileExplorer();
     initResizeHandle();
     return;
+  }
+
+  // Dead OR the dir changed (=> new sessionName) → tear down the local pane
+  // so we can create a fresh one attached to the right remote session.
+  if (existing) {
+    try { existing.ws?.close(); } catch (e) {}
+    try { existing.term?.dispose(); } catch (e) {}
+    try { existing.container?.remove(); } catch (e) {}
+    delete claudeTerminals[cluster];
   }
 
   // Create a per-cluster terminal div, stacked inside the container.
@@ -760,12 +812,10 @@ function launchClaude() {
 
   const ws = new WebSocket(wsUrl(`/ws/terminal/${cluster}`));
 
-  const projDir = clusterDir(cluster);
   const claudeUser = projectConfig.claude_user || "devuser";
-  const claudeScreen = projectConfig.claude_screen_session || "claude-remote-access";
 
   ws.onopen = () => {
-    term.writeln(`\x1b[32mConnected to ${cluster} — attaching screen "${claudeScreen}"…\x1b[0m\r`);
+    term.writeln(`\x1b[32mConnected to ${cluster} — attaching screen "${sessionName}"…\x1b[0m\r`);
     ws.send(`\x01RESIZE:${term.cols},${term.rows}`);
 
     setTimeout(() => {
@@ -788,7 +838,7 @@ function launchClaude() {
                 "echo 'defscrollback 100000'; } > ~/.config/gpu-access-board/screenrc\n"
             );
             setTimeout(() => {
-              ws.send(`screen -c ~/.config/gpu-access-board/screenrc -ls 2>/dev/null | grep -q '\\.${claudeScreen}\\b' && screen -c ~/.config/gpu-access-board/screenrc -d -r ${claudeScreen} || screen -c ~/.config/gpu-access-board/screenrc -S ${claudeScreen} bash -c 'claude --dangerously-skip-permissions; exec bash'\n`);
+              ws.send(`screen -c ~/.config/gpu-access-board/screenrc -ls 2>/dev/null | grep -q '\\.${sessionName}\\b' && screen -c ~/.config/gpu-access-board/screenrc -d -r ${sessionName} || screen -c ~/.config/gpu-access-board/screenrc -S ${sessionName} bash -c 'claude --dangerously-skip-permissions; exec bash'\n`);
             }, 200);
           }, 300);
         }, 300);
@@ -808,7 +858,10 @@ function launchClaude() {
     if (ws.readyState === WebSocket.OPEN) ws.send(`\x01RESIZE:${cols},${rows}`);
   });
 
-  claudeTerminals[cluster] = { term, ws, fitAddon, container: termDiv };
+  // Track the remote screen session name. A Settings change to the cluster's
+  // dir produces a different sessionName next time → Launch builds a fresh
+  // WS and creates/attaches the right session.
+  claudeTerminals[cluster] = { term, ws, fitAddon, container: termDiv, sessionName };
 
   initFileExplorer();
   initResizeHandle();
@@ -933,17 +986,32 @@ async function openFile(path, name) {
   const nameEl = document.getElementById("file-viewer-name");
   const contentEl = document.getElementById("file-viewer-content");
 
+  // Make sure the close button has a handler even before initFileExplorer
+  // (it's normally wired in launchClaude → initFileExplorer, but the user
+  // can switch cluster sub-tabs and click a file before launching there).
+  const closeBtn = document.getElementById("file-viewer-close");
+  if (closeBtn && !closeBtn.dataset.wired) {
+    closeBtn.onclick = () => viewer.classList.add("hidden");
+    closeBtn.dataset.wired = "1";
+  }
+
   currentOpenFilePath = path;
   nameEl.textContent = name;
-  contentEl.textContent = "Loading...";
+  contentEl.textContent = "Loading…";
   contentEl.className = "";
   viewer.classList.remove("hidden");
 
   document.getElementById("file-viewer-download").onclick = () => downloadFile(path, name);
 
   if (isImageFile(name)) {
+    const url = apiUrl(`/api/image/${cluster}?path=${encodeURIComponent(path)}`);
     try {
-      const resp = await fetch(apiUrl(`/api/image/${cluster}?path=${encodeURIComponent(path)}`));
+      const resp = await fetch(url);
+      if (!resp.ok) {
+        contentEl.textContent = `Error: ${resp.status} ${resp.statusText} on ${url}`;
+        contentEl.className = "plaintext";
+        return;
+      }
       const data = await resp.json();
       if (data.error) {
         contentEl.textContent = `Error: ${data.error}`;
@@ -953,17 +1021,31 @@ async function openFile(path, name) {
       contentEl.className = "image-view";
       contentEl.innerHTML = `<img src="data:${data.mime};base64,${data.data}" alt="${esc(name)}">`;
     } catch (e) {
-      contentEl.textContent = `Error: ${e.message}`;
+      contentEl.textContent = `Error: ${e.message} (fetching ${url})`;
       contentEl.className = "plaintext";
     }
     return;
   }
 
+  const url = apiUrl(`/api/file/${cluster}?path=${encodeURIComponent(path)}`);
   try {
-    const resp = await fetch(apiUrl(`/api/file/${cluster}?path=${encodeURIComponent(path)}`));
+    const resp = await fetch(url);
+    if (!resp.ok) {
+      contentEl.textContent = `Error: ${resp.status} ${resp.statusText} on ${url}`;
+      contentEl.className = "plaintext";
+      return;
+    }
     const data = await resp.json();
     if (data.error) {
       contentEl.textContent = `Error: ${data.error}`;
+      contentEl.className = "plaintext";
+      return;
+    }
+
+    // Never silently blank — text vs empty vs whitespace-only is otherwise
+    // indistinguishable to the user.
+    if (data.content == null || data.content === "") {
+      contentEl.textContent = "(empty file)";
       contentEl.className = "plaintext";
       return;
     }
