@@ -12,5 +12,13 @@ dependencies = [
     "requests",
 ]
 
+[project.optional-dependencies]
+# Opt-in deps for building Mac .app bundles of individual vibes.
+# Install with: uv sync --extra macapp
+macapp = [
+    "pywebview>=5.0",
+    "pyinstaller>=6.0",
+]
+
 [tool.uv]
 # uv-native lock lives in uv.lock. Run `uv sync` to install.

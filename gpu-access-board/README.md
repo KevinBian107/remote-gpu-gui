@@ -35,9 +35,17 @@ source .venv/bin/activate     # or prefix commands with `uv run`
 
 If you don't have uv yet: `curl -LsSf https://astral.sh/uv/install.sh | sh`.
 
-## Two ways to run
+## Three ways to run
 
-**You always need to be on the Salk VPN** — the backend needs network access to the cluster hosts.
+**You always need to be on the Salk VPN** — the backend needs network access to the cluster hosts. Pick whichever launch style fits your workflow:
+
+| | A — all-in-one | B — Pages + local backend | C — Mac app |
+|---|---|---|---|
+| frontend | served by uvicorn | GitHub Pages | bundled in the `.app` |
+| backend | `uvicorn` you start | `uvicorn` you start | spawned by the `.app` on an ephemeral port |
+| start command | `uv run uvicorn …` | `uv run uvicorn …` | double-click `GPU Access Board.app` |
+| use it from | browser tab | browser tab (bookmarkable) | dedicated native window |
+| best for | local dev | sharing via a stable URL | daily use, no terminal needed |
 
 ### A) All-in-one (simplest)
 
@@ -73,6 +81,24 @@ https://<you>.github.io/vibes/gpu-access-board/?backend=http://localhost:8000
 The page stores it in `localStorage` so you only need that link once.
 
 > **Why this works:** Per the W3C "secure contexts" spec, `http://localhost` is considered potentially trustworthy, so HTTPS origins (like GitHub Pages) are allowed to call it via `fetch()` and `WebSocket`. The backend additionally enables CORS for any origin listed under `server.cors_origins` in `config.yaml`.
+
+### C) Mac app (PyWebView bundle)
+
+Build a double-clickable `.app` that ships its own copy of the frontend and starts the backend on an ephemeral port. No uvicorn to launch, no browser tab to keep open.
+
+```bash
+uv sync --extra macapp                                  # one-time
+uv run python gpu-access-board/macapp/build_macapp.py   # build the bundle
+open 'gpu-access-board/dist/GPU Access Board.app'       # launch
+```
+
+First launch needs the Gatekeeper quarantine stripped (unsigned bundle):
+
+```bash
+xattr -dr com.apple.quarantine 'gpu-access-board/dist/GPU Access Board.app'
+```
+
+Full details — entry-point flow, hidden imports, where to edit `config.yaml` post-install — are in [`macapp/README.md`](macapp/README.md).
 
 ## Configuration
 
@@ -124,13 +150,17 @@ The screen name (`claude-remote-access` by default) is intentionally distinct fr
 gpu-access-board/
 ├── README.md
 ├── config.yaml        # all configuration
-├── config.py          # loads config.yaml
+├── config.py          # loads config.yaml (env var > Application Support > bundled)
 ├── app.py             # FastAPI app — REST + WebSocket endpoints
 ├── ssh_manager.py     # SSH connection pool (password auth)
-└── static/
-    ├── index.html     # single-page dashboard UI
-    ├── style.css      # refreshed indigo/violet palette, dark + light
-    └── app.js         # frontend: login, metrics, terminals, file explorer, backend-URL switching
+├── static/
+│   ├── index.html     # single-page dashboard UI
+│   ├── style.css      # refreshed indigo/violet palette, dark + light
+│   └── app.js         # frontend: login, metrics, terminals, file explorer, backend-URL switching
+└── macapp/            # Mac .app build (option C in "Three ways to run")
+    ├── app_entry.py   # PyWebView entry — spawns uvicorn, opens window
+    ├── build_macapp.py
+    └── build_icon.sh
 ```
 
 ## Security notes

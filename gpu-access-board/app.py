@@ -3,6 +3,7 @@ import base64
 import posixpath
 import re
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,10 @@ from pydantic import BaseModel
 
 from config import CLUSTERS, PROJECT, SERVER
 from ssh_manager import SSHManager
+
+# Absolute so the static mount works both when launched from any CWD (dev) and
+# when bundled inside a PyInstaller .app (where the CWD is unpredictable).
+_STATIC_DIR = Path(__file__).parent / "static"
 
 ssh = SSHManager()
 
@@ -37,6 +42,13 @@ app.add_middleware(
 
 
 # ── REST endpoints ────────────────────────────────────────────────────────────
+
+
+@app.get("/api/health")
+async def health():
+    """Readiness probe. Used by the Mac app's PyWebView entry to detect that
+    the backend has finished starting before opening the window."""
+    return JSONResponse(content={"ok": True})
 
 
 class ClusterDef(BaseModel):
@@ -754,4 +766,4 @@ async def create_file(cluster: str, req: CreateRequest):
 
 # ── Static files (must be last) ──────────────────────────────────────────────
 
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+app.mount("/", StaticFiles(directory=str(_STATIC_DIR), html=True), name="static")

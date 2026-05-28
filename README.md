@@ -80,3 +80,15 @@ uv run vibes.py gpu-access-board
 
 Keep vibes small and self-contained. A vibe shouldn't need a framework — it just needs to work.
 
+## Mac apps (optional, per vibe)
+
+Any vibe that benefits from being a one-click app can ship a `macapp/` subdirectory with a PyWebView entry + a PyInstaller build script. The `macapp` extra in `pyproject.toml` pulls in the build deps:
+
+```bash
+uv sync --extra macapp
+```
+
+Each vibe builds independently — there is no monolithic vibes.app. Today only [`gpu-access-board`](gpu-access-board/macapp/) ships a `macapp/`; see its [README](gpu-access-board/macapp/README.md) for the reference pattern (`app_entry.py` → spawn uvicorn on an ephemeral port → poll `/api/health` → open WebView). To app-ify another vibe, copy that folder and adjust the entry point, hidden imports, and icon.
+
+For vibes like [`gpu-dashboard-agent`](gpu-dashboard-agent/) that have **no local backend** (the viewer reads a Gist directly), the browser + GitHub Pages flow is already a fine "app-like" experience — bookmarking the Pages URL is simpler than building a bundle.
+

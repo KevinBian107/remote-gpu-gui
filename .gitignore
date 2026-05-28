@@ -2,3 +2,8 @@
 __pycache__
 .venv/
 .python-version
+
+# Mac app build artifacts (PyInstaller output for any vibe's macapp/)
+dist/
+build/
+*.spec
